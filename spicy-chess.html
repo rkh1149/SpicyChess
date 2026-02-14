@@ -75,7 +75,7 @@
     [data-square].hl { outline:3px solid var(--accent); outline-offset: -3px; }
 
     /* Board size (inner board area) */
-    #board { width: var(--board-size); height: var(--board-size); display:inline-block; vertical-align:top; }
+    #board { width: var(--board-size); height: var(--board-size); display:inline-block; vertical-align:top; touch-action: manipulation; }
 
     /* Fallback styles in case Chessboard.js CSS fails to load (matches v0.3.0) */
     .chessboard-63f37 { border: 2px solid #333; box-sizing: border-box; }
@@ -489,6 +489,9 @@ const timeControlSeconds = { blitz: 300, rapid: 600, classical: Infinity };
 let clockSeconds = { w: 600, b: 600 };
 let clockTicker = null;
 let lastClockTs = 0;
+let touchMoveSource = null;
+let boardTouchInputBound = null;
+const squareHandlerBindings = new Map();
 
 const openingBookLines = [
   ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5'],
@@ -1588,6 +1591,8 @@ function forceStockfishFallbackMove(reasonText) {
 function startGame() {
   closeDemoOverlay();
   hideEndgameOverlay();
+  clearSquareInteractionHandlers();
+  resetTouchMoveSelection();
   modeName = document.getElementById('modeSelect').value;
   modeConfig = gameModes[modeName];
   userSide = (document.getElementById('sideSelect')?.value || 'white');
@@ -1768,6 +1773,8 @@ function startGame() {
           // Orient to player's side
           board.orientation(userSide === 'black' ? 'black' : 'white');
           applyBoardHighlights();
+          bindBoardTouchInput();
+          resetTouchMoveSelection();
 
           // If user plays Black, let opponent move first
           const myColor = (userSide === 'white') ? 'w' : 'b';
@@ -1821,6 +1828,7 @@ function startGame() {
 }
 
 function onDragStart(source, piece) {
+  resetTouchMoveSelection();
   if (!game || !gameActive || game.game_over() || isDemoRunning) return false;
   const turnColor = game.turn();         // 'w' or 'b'
   const myColor = (userSide === 'white') ? 'w' : 'b';
@@ -1843,10 +1851,16 @@ function onMouseoutSquare() {
 }
 
 function onDrop(source, target, piece) {
+  resetTouchMoveSelection();
+  if (!attemptPlayerMove(source, target)) return 'snapback';
+  return;
+}
+
+function attemptPlayerMove(source, target) {
   clearLegalTargets();
   let move = null;
   try { move = game.move({ from: source, to: target, promotion: 'q' }); } catch (e) { move = null; }
-  if (!move) return 'snapback';
+  if (!move) return false;
 
   trackCapturedFromMove(move);
   // cooldown tick for mover
@@ -1890,9 +1904,93 @@ function onDrop(source, target, piece) {
   }
 
   postMoveChecksAndFlow(move.color);
-  return;
+  return true;
 }
 function onSnapEnd() { board.position(game.fen()); applyBoardHighlights(); }
+
+function resetTouchMoveSelection() {
+  touchMoveSource = null;
+  removeSquareHighlights();
+  clearLegalTargets();
+}
+
+function handleTouchSquareTap(square) {
+  if (!game || !gameActive || game.game_over() || isDemoRunning) return;
+  if (squareHandlerBindings.size > 0) return;
+
+  const myColor = getUserColorCode();
+  if (game.turn() !== myColor) return;
+
+  const piece = getPieceOnSquare(square);
+  const isOwnPiece = piece && ((myColor === 'w' && piece.startsWith('w')) || (myColor === 'b' && piece.startsWith('b')));
+
+  if (!touchMoveSource) {
+    if (!isOwnPiece) return;
+    touchMoveSource = square;
+    showLegalTargets(square);
+    highlightSquare(square, true);
+    return;
+  }
+
+  if (square === touchMoveSource) {
+    resetTouchMoveSelection();
+    return;
+  }
+
+  if (isOwnPiece) {
+    resetTouchMoveSelection();
+    touchMoveSource = square;
+    showLegalTargets(square);
+    highlightSquare(square, true);
+    return;
+  }
+
+  const from = touchMoveSource;
+  resetTouchMoveSelection();
+  const moved = attemptPlayerMove(from, square);
+  if (!moved) {
+    touchMoveSource = from;
+    showLegalTargets(from);
+    highlightSquare(from, true);
+  }
+}
+
+function onBoardTouchPointerUp(e) {
+  if (!e || e.pointerType === 'mouse') return;
+  if (squareHandlerBindings.size > 0) return;
+  const sqEl = e.target && e.target.closest ? e.target.closest('[data-square]') : null;
+  if (!sqEl) return;
+  e.preventDefault();
+  const sq = sqEl.getAttribute('data-square');
+  if (!sq) return;
+  handleTouchSquareTap(sq);
+}
+
+function onBoardTouchEndFallback(e) {
+  if (window.PointerEvent) return;
+  if (squareHandlerBindings.size > 0) return;
+  const target = (e.changedTouches && e.changedTouches.length)
+    ? document.elementFromPoint(e.changedTouches[0].clientX, e.changedTouches[0].clientY)
+    : e.target;
+  const sqEl = target && target.closest ? target.closest('[data-square]') : null;
+  if (!sqEl) return;
+  e.preventDefault();
+  const sq = sqEl.getAttribute('data-square');
+  if (!sq) return;
+  handleTouchSquareTap(sq);
+}
+
+function bindBoardTouchInput() {
+  const boardEl = document.getElementById('board');
+  if (!boardEl || boardTouchInputBound === boardEl) return;
+  if (boardTouchInputBound) {
+    boardTouchInputBound.removeEventListener('pointerup', onBoardTouchPointerUp);
+    boardTouchInputBound.removeEventListener('touchend', onBoardTouchEndFallback);
+  }
+  boardEl.addEventListener('pointerup', onBoardTouchPointerUp, { passive: false });
+  if (!window.PointerEvent) boardEl.addEventListener('touchend', onBoardTouchEndFallback, { passive: false });
+  boardTouchInputBound = boardEl;
+}
 
 /* =========================
    Special Moves
@@ -2697,8 +2795,47 @@ function isKnightMove(from, to) {
   const dx = Math.abs(fx - tx), dy = Math.abs(fy - ty);
   return (dx === 1 && dy === 2) || (dx === 2 && dy === 1);
 }
-function attachSquareClickHandlers(handler) { document.querySelectorAll('[data-square]').forEach(el => el.addEventListener('click', handler)); }
-function detachSquareClickHandlers(handler) { document.querySelectorAll('[data-square]').forEach(el => el.removeEventListener('click', handler)); }
+function attachSquareClickHandlers(handler) {
+  if (!handler || squareHandlerBindings.has(handler)) return;
+  const clickWrapper = (e) => {
+    const sqEl = e.target && e.target.closest ? e.target.closest('[data-square]') : null;
+    if (!sqEl) return;
+    handler({ target: sqEl, originalEvent: e });
+  };
+  const pointerWrapper = (e) => {
+    if (!e || e.pointerType === 'mouse') return;
+    const sqEl = e.target && e.target.closest ? e.target.closest('[data-square]') : null;
+    if (!sqEl) return;
+    e.preventDefault();
+    handler({ target: sqEl, originalEvent: e });
+  };
+  squareHandlerBindings.set(handler, { clickWrapper, pointerWrapper });
+  document.querySelectorAll('[data-square]').forEach(el => {
+    el.addEventListener('click', clickWrapper);
+    el.addEventListener('pointerup', pointerWrapper, { passive: false });
+  });
+}
+
+function detachSquareClickHandlers(handler) {
+  const bound = squareHandlerBindings.get(handler);
+  if (!bound) return;
+  document.querySelectorAll('[data-square]').forEach(el => {
+    el.removeEventListener('click', bound.clickWrapper);
+    el.removeEventListener('pointerup', bound.pointerWrapper);
+  });
+  squareHandlerBindings.delete(handler);
+}
+
+function clearSquareInteractionHandlers() {
+  const squares = document.querySelectorAll('[data-square]');
+  squareHandlerBindings.forEach((bound) => {
+    squares.forEach(el => {
+      el.removeEventListener('click', bound.clickWrapper);
+      el.removeEventListener('pointerup', bound.pointerWrapper);
+    });
+  });
+  squareHandlerBindings.clear();
+}
 function highlightSquare(sq, on=true) { const el = document.querySelector(`[data-square='${sq}']`); if (el) el.classList.toggle('hl', !!on); }
 function removeSquareHighlights() { document.querySelectorAll('[data-square].hl').forEach(el => el.classList.remove('hl')); }
 function fenToBoard(fen) {
