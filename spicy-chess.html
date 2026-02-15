@@ -480,6 +480,7 @@ let sfWantGo = false;            // when true, send position+go on next readyok
 let sfLastGoFen = '';            // FEN that current Stockfish search was started from
 let sfLastGoTs = 0;
 let sfBestmoveTimer = null;
+let sfInitInProgress = false;
 let aiServerUrl = '';            // (unused here—kept for compatibility)
 
 let moveHistory = [];            // list of FENs (for Back in Time)
@@ -1256,6 +1257,23 @@ function scoreFromMatePly(matePly) {
   return sign * (2000 - Math.min(1900, dist * 10));
 }
 
+function normalizeUciLines(raw) {
+  if (typeof raw === 'string') {
+    return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+  if (raw && typeof raw.data === 'string') {
+    return raw.data.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+  if (raw && typeof raw.message === 'string') {
+    return raw.message.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+  if (raw && typeof raw.msg === 'string') {
+    return raw.msg.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+  const txt = String(raw || '').trim();
+  return txt ? [txt] : [];
+}
+
 function parseUciScore(line) {
   const cp = line.match(/\bscore\s+cp\s+(-?\d+)/);
   if (cp) return parseInt(cp[1], 10);
@@ -1264,10 +1282,14 @@ function parseUciScore(line) {
   return null;
 }
 
-function createStockfishWorkerForAnalysis() {
+async function createStockfishWorkerForAnalysis() {
   try {
     if (typeof STOCKFISH === 'function') {
-      return STOCKFISH();
+      const maybe = STOCKFISH();
+      if (maybe && typeof maybe.then === 'function') {
+        return await maybe;
+      }
+      return maybe;
     }
   } catch (_) {}
   if (window.Worker) {
@@ -1278,8 +1300,8 @@ function createStockfishWorkerForAnalysis() {
 }
 
 function createStockfishAnalyzer() {
-  const worker = createStockfishWorkerForAnalysis();
-  if (!worker) return Promise.resolve(null);
+  return createStockfishWorkerForAnalysis().then((worker) => {
+    if (!worker) return null;
   return new Promise((resolveOuter) => {
     let currentEval = null;
     let settled = false;
@@ -1321,41 +1343,45 @@ function createStockfishAnalyzer() {
     };
 
     worker.onmessage = (e) => {
-      const raw = e && e.data;
-      const line = (typeof raw === 'string') ? raw : String(raw || '');
-      if (!line) return;
-      if (line.includes('uciok')) {
-        if (uciTimer) clearTimeout(uciTimer);
-        send('setoption name MultiPV value 1');
-        send('isready');
-        readyTimer = setTimeout(() => fail(), 3500);
-        return;
-      }
-      if (line.includes('readyok')) {
-        if (readyTimer) clearTimeout(readyTimer);
-        finish({
-          evaluateFen,
-          close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
-        });
-        return;
-      }
-      if (currentEval && line.startsWith('info ')) {
-        const sc = parseUciScore(line);
-        if (sc !== null) currentEval.score = sc;
-        return;
-      }
-      if (currentEval && line.startsWith('bestmove')) {
-        const out = currentEval.score || 0;
-        const cb = currentEval.resolve;
-        currentEval = null;
-        cb(out);
+      const lines = normalizeUciLines(e && e.data);
+      if (!lines.length) return;
+      for (const line of lines) {
+        if (line.includes('uciok')) {
+          if (uciTimer) clearTimeout(uciTimer);
+          send('setoption name MultiPV value 1');
+          send('isready');
+          if (readyTimer) clearTimeout(readyTimer);
+          readyTimer = setTimeout(() => fail(), 9000);
+          continue;
+        }
+        if (line.includes('readyok')) {
+          if (readyTimer) clearTimeout(readyTimer);
+          finish({
+            evaluateFen,
+            close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
+          });
+          continue;
+        }
+        if (currentEval && line.startsWith('info ')) {
+          const sc = parseUciScore(line);
+          if (sc !== null) currentEval.score = sc;
+          continue;
+        }
+        if (currentEval && line.startsWith('bestmove')) {
+          const out = currentEval.score || 0;
+          const cb = currentEval.resolve;
+          currentEval = null;
+          cb(out);
+          continue;
+        }
       }
     };
     worker.onerror = () => fail();
     worker.onmessageerror = () => fail();
     send('uci');
-    uciTimer = setTimeout(() => fail(), 3500);
+    uciTimer = setTimeout(() => fail(), 9000);
   });
+  }).catch(() => null);
 }
 
 function turnFromFen(fen) {
@@ -1819,6 +1845,7 @@ function forceStockfishFallbackMove(reasonText) {
   if (opponentType !== 'stockfish') return;
   const myColor = getUserColorCode();
   if (game.turn() === myColor) return;
+  sfInitInProgress = false;
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
   log(`${reasonText}; using local fallback move.`);
   aiMoveLocalGreedy();
@@ -1853,67 +1880,65 @@ function startGame() {
   sfWantGo = false;
   sfLastGoFen = '';
   sfLastGoTs = 0;
+  sfInitInProgress = false;
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
 
   // Stockfish worker setup if needed
   if (opponentType === 'stockfish') {
+    const startSessionId = gameSessionId;
     function attachSFHandlers(worker){
       worker.onmessage = (e) => {
-        // Handle different message shapes from various Stockfish builds
-        const raw = e.data;
-        let line = '';
-        if (typeof raw === 'string') line = raw;
-        else if (raw && typeof raw.data === 'string') line = raw.data;
-        else if (raw && typeof raw.message === 'string') line = raw.message;
-        else if (raw && typeof raw.msg === 'string') line = raw.msg;
-        else line = String(raw || '');
-        console.debug('[SF msg]', raw);
-        console.debug('[SF line]', line);
-        if (!line) return;
-
-        if (line.includes('uciok')) {
-          configureStockfishForLevel(worker);
-          // Engine accepted UCI; ask readiness if we haven't yet
-          if (!sfReady) { try { worker.postMessage('isready'); } catch(_) {} }
-        }
-        if (line.includes('readyok')) {
-          sfReady = true;
-          console.log('[SF] readyok');
-          if (sfWantGo && game) {
-            sfWantGo = false;
-            const fen = game.fen();
-            console.log('[SF] sending position + go');
-            sendStockfishGo(worker, fen);
+        const lines = normalizeUciLines(e && e.data);
+        if (!lines.length) return;
+        for (const line of lines) {
+          console.debug('[SF line]', line);
+          if (line.includes('uciok')) {
+            configureStockfishForLevel(worker);
+            if (!sfReady) { try { worker.postMessage('isready'); } catch(_) {} }
+            continue;
           }
-        }
-
-        if (line.includes('bestmove')) {
-          if (opponentType !== 'stockfish' || !game || game.game_over()) return;
-          if (sfLastGoFen && game.fen() !== sfLastGoFen) {
-            console.log('[SF] Ignoring stale bestmove for old position');
-            return;
+          if (line.includes('readyok')) {
+            sfReady = true;
+            sfInitInProgress = false;
+            console.log('[SF] readyok');
+            if (sfWantGo && game) {
+              sfWantGo = false;
+              const fen = game.fen();
+              console.log('[SF] sending position + go');
+              sendStockfishGo(worker, fen);
+            }
+            continue;
           }
-          const match = line.match(/bestmove\s+([a-h][1-8][a-h][1-8][qrbn]?)/i);
-          const uci = match ? match[1].toLowerCase() : '';
-          if (uci && uci.length >= 4) {
-            if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
-            const from = uci.slice(0,2), to = uci.slice(2,4), promo = uci.slice(4) || undefined;
-            try {
-              const mv = game.move({ from, to, promotion: promo });
-              if (mv) {
-                trackCapturedFromMove(mv);
-                tickShadowCooldownFor(mv.color);
-                board.position(game.fen());
-                setLastMove(mv.from, mv.to);
-                appendHistoryEntry(mv.san);
-                halfMoveCount++;
-                sfLastGoFen = '';
-                log(`Opponent (Stockfish): ${mv.san}`);
-                postMoveChecksAndFlow(mv.color);
-              }
-            } catch(_) {}
-          } else {
-            console.warn('[SF] bestmove received but could not parse move:', line);
+
+          if (line.includes('bestmove')) {
+            if (opponentType !== 'stockfish' || !game || game.game_over()) return;
+            if (sfLastGoFen && game.fen() !== sfLastGoFen) {
+              console.log('[SF] Ignoring stale bestmove for old position');
+              continue;
+            }
+            const match = line.match(/bestmove\s+([a-h][1-8][a-h][1-8][qrbn]?)/i);
+            const uci = match ? match[1].toLowerCase() : '';
+            if (uci && uci.length >= 4) {
+              if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
+              const from = uci.slice(0,2), to = uci.slice(2,4), promo = uci.slice(4) || undefined;
+              try {
+                const mv = game.move({ from, to, promotion: promo });
+                if (mv) {
+                  trackCapturedFromMove(mv);
+                  tickShadowCooldownFor(mv.color);
+                  board.position(game.fen());
+                  setLastMove(mv.from, mv.to);
+                  appendHistoryEntry(mv.san);
+                  halfMoveCount++;
+                  sfLastGoFen = '';
+                  log(`Opponent (Stockfish): ${mv.san}`);
+                  postMoveChecksAndFlow(mv.color);
+                }
+              } catch(_) {}
+            } else {
+              console.warn('[SF] bestmove received but could not parse move:', line);
+            }
+            continue;
           }
         }
       };
@@ -1945,31 +1970,51 @@ function startGame() {
       const ping = () => {
         if (sfReady) return; // stop when ready
         const elapsed = Date.now() - startTs;
-        if (elapsed > 10000) { console.warn('[SF] ready ping timeout (>10s)'); return; }
+        if (elapsed > 15000) { console.warn('[SF] ready ping timeout (>15s)'); sfInitInProgress = false; return; }
         try { worker.postMessage('isready'); } catch(_) {}
         setTimeout(ping, 300);
       };
       setTimeout(ping, 50);
     }
 
+    const bindAndStartWorker = (worker, label) => {
+      if (!worker) throw new Error('Stockfish worker not created');
+      if (startSessionId !== gameSessionId) {
+        try { worker.terminate && worker.terminate(); } catch (_) {}
+        return;
+      }
+      sfWorker = worker;
+      sfInitInProgress = true;
+      console.log(label);
+      startSF(worker);
+    };
+
     try {
       if (typeof STOCKFISH === 'function') {
-        // Preferred: factory returns a worker-like engine object
-        sfWorker = STOCKFISH();
-        console.log('[SF] Engine created via STOCKFISH() factory');
+        const maybeEngine = STOCKFISH();
+        if (maybeEngine && typeof maybeEngine.then === 'function') {
+          sfInitInProgress = true;
+          maybeEngine.then((resolvedWorker) => {
+            bindAndStartWorker(resolvedWorker, '[SF] Engine resolved via async STOCKFISH() factory');
+          }).catch((err) => {
+            sfInitInProgress = false;
+            console.error('[SF] Async STOCKFISH() init failed', err);
+            forceStockfishFallbackMove('Stockfish async init failed');
+          });
+        } else {
+          bindAndStartWorker(maybeEngine, '[SF] Engine created via STOCKFISH() factory');
+        }
       } else if (window.Worker) {
         try {
-          sfWorker = new Worker('./stockfish.worker.js');
-          console.log('[SF] Worker started (stockfish.worker.js)');
+          bindAndStartWorker(new Worker('./stockfish.worker.js'), '[SF] Worker started (stockfish.worker.js)');
         } catch (_) {
-          sfWorker = new Worker('./stockfish.js');
-          console.log('[SF] Worker started (stockfish.js)');
+          bindAndStartWorker(new Worker('./stockfish.js'), '[SF] Worker started (stockfish.js)');
         }
       } else {
         throw new Error('Web Workers not supported');
       }
-      startSF(sfWorker);
     } catch (err) {
+      sfInitInProgress = false;
       console.error('Failed to start Stockfish. Ensure JS & WASM are next to HTML and served over http(s).', err);
       alert('Could not start Stockfish worker. Check console for details.');
     }
@@ -2105,10 +2150,41 @@ function onDrop(source, target, piece) {
   return;
 }
 
-function attemptPlayerMove(source, target) {
+function getPromotionChoicesForMove(source, target) {
+  if (!game) return [];
+  const moves = game.moves({ square: source, verbose: true }) || [];
+  const promos = moves
+    .filter(m => m && m.to === target && m.promotion)
+    .map(m => String(m.promotion).toLowerCase())
+    .filter(p => ['q', 'r', 'b', 'n'].includes(p));
+  return Array.from(new Set(promos));
+}
+
+function promptPromotionChoice(source, target, choices) {
+  const opts = Array.isArray(choices) && choices.length ? choices : ['q', 'r', 'b', 'n'];
+  const text = `Promote pawn at ${target.toUpperCase()} to (q, r, b, n):`;
+  const raw = window.prompt(text, 'q');
+  if (raw == null) return null;
+  const pick = String(raw).trim().toLowerCase();
+  if (opts.includes(pick)) return pick;
+  return 'q';
+}
+
+function attemptPlayerMove(source, target, forcedPromotion = null) {
   clearLegalTargets();
+  const promotionChoices = getPromotionChoicesForMove(source, target);
+  let promotion = forcedPromotion;
+  if (!promotionChoices.length) promotion = undefined;
+  else if (!promotion || !promotionChoices.includes(String(promotion).toLowerCase())) {
+    promotion = promptPromotionChoice(source, target, promotionChoices);
+    if (!promotion) return false;
+  }
   let move = null;
-  try { move = game.move({ from: source, to: target, promotion: 'q' }); } catch (e) { move = null; }
+  try {
+    const payload = { from: source, to: target };
+    if (promotion) payload.promotion = promotion;
+    move = game.move(payload);
+  } catch (e) { move = null; }
   if (!move) return false;
 
   trackCapturedFromMove(move);
@@ -2468,6 +2544,12 @@ function maybeAIMove() {
 function aiMoveStockfish() {
   console.log('[AI] aiMoveStockfish ENTRY');
   if (!gameActive) return;
+  if (sfInitInProgress && !sfWorker) {
+    sfWantGo = true;
+    sfLastGoFen = game.fen();
+    console.log('[AI] Stockfish still initializing; waiting for engine promise');
+    return;
+  }
   if (!sfWorker) {
     console.warn('Stockfish worker not initialized');
     forceStockfishFallbackMove('Stockfish worker unavailable');
@@ -2487,8 +2569,9 @@ function aiMoveStockfish() {
     send('isready');
     if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
     sfBestmoveTimer = setTimeout(() => {
+      sfInitInProgress = false;
       forceStockfishFallbackMove('Stockfish init timeout');
-    }, 3200);
+    }, 9000);
   }
 }
 
