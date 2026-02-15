@@ -98,6 +98,15 @@
       position: relative;
     }
     .board-actions { margin-top: 8px; text-align: center; }
+    #touchHint {
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: #4b5a72;
+      background: #f8fbff;
+      border: 1px solid #d7e4f5;
+      border-radius: 8px;
+      padding: 6px 8px;
+    }
     #eloBoardPanel {
       margin-top: 8px;
       border: 1px solid #d4dce8;
@@ -217,6 +226,10 @@
     [data-square].sq-check { animation: checkPulse 900ms ease-in-out infinite; }
     [data-square].sq-demo-from { box-shadow: inset 0 0 0 4px rgba(30, 136, 229, 0.85); }
     [data-square].sq-demo-to { box-shadow: inset 0 0 0 4px rgba(255, 143, 0, 0.9); }
+    [data-square].sq-hint-from { box-shadow: inset 0 0 0 4px rgba(43, 108, 196, 0.9); }
+    [data-square].sq-hint-to { box-shadow: inset 0 0 0 4px rgba(15, 147, 115, 0.9); }
+    .hint-from-text { color: #2b6cc4; font-weight: 700; }
+    .hint-to-text { color: #0f8f73; font-weight: 700; }
     @keyframes checkPulse {
       0% { box-shadow: inset 0 0 0 2px rgba(217, 72, 15, 0.35); }
       50% { box-shadow: inset 0 0 0 5px rgba(217, 72, 15, 0.75); }
@@ -325,6 +338,7 @@
       </div>
       <div class="board-actions">
         <button id="askHelpBtn" style="display:none;" title="Ask for your best next move">Ask Best Move</button>
+        <div id="touchHint">Touch controls: tap a piece, then tap its destination square.</div>
         <div id="eloBoardPanel">
           <div><strong>White ELO:</strong> <span id="eloWhite">1200</span></div>
           <div><strong>Black ELO:</strong> <span id="eloBlack">1200</span></div>
@@ -492,6 +506,8 @@ let lastClockTs = 0;
 let touchMoveSource = null;
 let boardTouchInputBound = null;
 const squareHandlerBindings = new Map();
+let helpPreviewMove = { from: null, to: null };
+let helpPreviewTimer = null;
 
 const openingBookLines = [
   ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5'],
@@ -623,22 +639,26 @@ function updateHelpInfo() {
   const el = document.getElementById('helpInfo');
   if (!el) return;
   if (helpMode !== 'on') {
+    clearHelpPreview();
     el.textContent = 'Help: Off';
     updateHelpButtonState();
     return;
   }
   if (!game) {
+    clearHelpPreview();
     el.textContent = 'Help: On. Start a game, then click Ask Best Move.';
     updateHelpButtonState();
     return;
   }
   if (game.game_over()) {
+    clearHelpPreview();
     el.textContent = 'Help: Game over.';
     updateHelpButtonState();
     return;
   }
   const myColor = getUserColorCode();
   if (game.turn() !== myColor) {
+    clearHelpPreview();
     el.textContent = 'Help: Wait for your turn, then click Ask Best Move.';
     updateHelpButtonState();
     return;
@@ -658,14 +678,16 @@ function onAskHelpClick() {
   const best = pickBestMoveDeterministic(depth);
   if (!best || !best.move) {
     el.textContent = 'Help: No legal move found.';
+    clearHelpPreview();
     updateHelpButtonState();
     return;
   }
   const mv = best.move;
-  el.textContent = `Help: Best move is ${mv.san} (${mv.from}->${mv.to})`;
-  highlightSquare(mv.from, true);
-  highlightSquare(mv.to, true);
-  setTimeout(removeSquareHighlights, 1100);
+  const sanText = escapeHtml(mv.san || '?');
+  const fromText = escapeHtml(mv.from || '--');
+  const toText = escapeHtml(mv.to || '--');
+  el.innerHTML = `Help: Best move is <strong>${sanText}</strong> (<span class="hint-from-text">${fromText}</span> to <span class="hint-to-text">${toText}</span>).`;
+  showHelpPreview(mv.from, mv.to, 3000);
   updateHelpButtonState();
 }
 
@@ -1112,7 +1134,7 @@ function refreshCaptureAndMaterialUI() {
 
 function clearBoardHighlightClasses() {
   const els = document.querySelectorAll('[data-square]');
-  els.forEach(el => el.classList.remove('sq-last-from', 'sq-last-to', 'sq-legal', 'sq-check', 'sq-demo-from', 'sq-demo-to'));
+  els.forEach(el => el.classList.remove('sq-last-from', 'sq-last-to', 'sq-legal', 'sq-check', 'sq-demo-from', 'sq-demo-to', 'sq-hint-from', 'sq-hint-to'));
 }
 
 function findKingSquare(colorCode) {
@@ -1130,6 +1152,8 @@ function applyBoardHighlights() {
     clearBoardHighlightClasses();
     if (lastMoveSquares.from) highlightByClass(lastMoveSquares.from, 'sq-last-from');
     if (lastMoveSquares.to) highlightByClass(lastMoveSquares.to, 'sq-last-to');
+    if (helpPreviewMove.from) highlightByClass(helpPreviewMove.from, 'sq-hint-from');
+    if (helpPreviewMove.to) highlightByClass(helpPreviewMove.to, 'sq-hint-to');
     legalTargetSquares.forEach(sq => highlightByClass(sq, 'sq-legal'));
     if (game && game.in_check()) {
       const ksq = findKingSquare(game.turn());
@@ -1157,6 +1181,28 @@ function showLegalTargets(fromSquare) {
   if (!game) return;
   legalTargetSquares = game.moves({ square: fromSquare, verbose: true }).map(m => m.to);
   applyBoardHighlights();
+}
+
+function clearHelpPreview() {
+  helpPreviewMove = { from: null, to: null };
+  if (helpPreviewTimer) {
+    clearTimeout(helpPreviewTimer);
+    helpPreviewTimer = null;
+  }
+  applyBoardHighlights();
+}
+
+function showHelpPreview(from, to, ttlMs = 2200) {
+  helpPreviewMove = { from: from || null, to: to || null };
+  if (helpPreviewTimer) clearTimeout(helpPreviewTimer);
+  applyBoardHighlights();
+  if (ttlMs > 0) {
+    helpPreviewTimer = setTimeout(() => {
+      helpPreviewTimer = null;
+      helpPreviewMove = { from: null, to: null };
+      applyBoardHighlights();
+    }, ttlMs);
+  }
 }
 
 function hideEndgameOverlay() {
@@ -1386,6 +1432,7 @@ function isFiftyMoveDrawState() {
 }
 
 function postMoveChecksAndFlow(lastMoverColor) {
+  clearHelpPreview();
   updateTurnInfo();
   refreshSpecialButtons();
 
@@ -1591,6 +1638,7 @@ function forceStockfishFallbackMove(reasonText) {
 function startGame() {
   closeDemoOverlay();
   hideEndgameOverlay();
+  clearHelpPreview();
   clearSquareInteractionHandlers();
   resetTouchMoveSelection();
   modeName = document.getElementById('modeSelect').value;
@@ -1958,7 +2006,7 @@ function handleTouchSquareTap(square) {
 function onBoardTouchPointerUp(e) {
   if (!e || e.pointerType === 'mouse') return;
   if (squareHandlerBindings.size > 0) return;
-  const sqEl = e.target && e.target.closest ? e.target.closest('[data-square]') : null;
+  const sqEl = getSquareElementFromInputEvent(e);
   if (!sqEl) return;
   e.preventDefault();
   const sq = sqEl.getAttribute('data-square');
@@ -1969,10 +2017,7 @@ function onBoardTouchPointerUp(e) {
 function onBoardTouchEndFallback(e) {
   if (window.PointerEvent) return;
   if (squareHandlerBindings.size > 0) return;
-  const target = (e.changedTouches && e.changedTouches.length)
-    ? document.elementFromPoint(e.changedTouches[0].clientX, e.changedTouches[0].clientY)
-    : e.target;
-  const sqEl = target && target.closest ? target.closest('[data-square]') : null;
+  const sqEl = getSquareElementFromInputEvent(e);
   if (!sqEl) return;
   e.preventDefault();
   const sq = sqEl.getAttribute('data-square');
@@ -2789,6 +2834,27 @@ function getPieceOnSquare(square) {
   return (p.color === 'w' ? 'w' : 'b') + p.type;
 }
 function getCapturedPieces(playerColor) { return lostPieces[playerColor].slice(); }
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+function getSquareElementFromInputEvent(e) {
+  if (!e) return null;
+  let target = null;
+  if (typeof e.clientX === 'number' && typeof e.clientY === 'number') {
+    target = document.elementFromPoint(e.clientX, e.clientY);
+  } else if (e.changedTouches && e.changedTouches.length) {
+    const t = e.changedTouches[0];
+    target = document.elementFromPoint(t.clientX, t.clientY);
+  } else {
+    target = e.target || null;
+  }
+  return target && target.closest ? target.closest('[data-square]') : null;
+}
 function isKnightMove(from, to) {
   const fx = from.charCodeAt(0), fy = parseInt(from[1],10);
   const tx = to.charCodeAt(0), ty = parseInt(to[1],10);
@@ -2798,13 +2864,13 @@ function isKnightMove(from, to) {
 function attachSquareClickHandlers(handler) {
   if (!handler || squareHandlerBindings.has(handler)) return;
   const clickWrapper = (e) => {
-    const sqEl = e.target && e.target.closest ? e.target.closest('[data-square]') : null;
+    const sqEl = getSquareElementFromInputEvent(e);
     if (!sqEl) return;
     handler({ target: sqEl, originalEvent: e });
   };
   const pointerWrapper = (e) => {
     if (!e || e.pointerType === 'mouse') return;
-    const sqEl = e.target && e.target.closest ? e.target.closest('[data-square]') : null;
+    const sqEl = getSquareElementFromInputEvent(e);
     if (!sqEl) return;
     e.preventDefault();
     handler({ target: sqEl, originalEvent: e });
