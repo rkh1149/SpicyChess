@@ -1343,7 +1343,7 @@ function createStockfishAnalyzer() {
     };
 
     worker.onmessage = (e) => {
-      const lines = normalizeUciLines(e && e.data);
+      const lines = normalizeUciLines(e);
       if (!lines.length) return;
       for (const line of lines) {
         if (line.includes('uciok')) {
@@ -1888,7 +1888,7 @@ function startGame() {
     const startSessionId = gameSessionId;
     function attachSFHandlers(worker){
       worker.onmessage = (e) => {
-        const lines = normalizeUciLines(e && e.data);
+        const lines = normalizeUciLines(e);
         if (!lines.length) return;
         for (const line of lines) {
           console.debug('[SF line]', line);
@@ -2544,10 +2544,10 @@ function maybeAIMove() {
 function aiMoveStockfish() {
   console.log('[AI] aiMoveStockfish ENTRY');
   if (!gameActive) return;
-  if (sfInitInProgress && !sfWorker) {
+  if (sfInitInProgress && !sfReady) {
     sfWantGo = true;
     sfLastGoFen = game.fen();
-    console.log('[AI] Stockfish still initializing; waiting for engine promise');
+    console.log('[AI] Stockfish still initializing; waiting for readyok');
     return;
   }
   if (!sfWorker) {
@@ -2562,6 +2562,7 @@ function aiMoveStockfish() {
     configureStockfishForLevel(sfWorker);
     sendStockfishGo(sfWorker, fen);
   } else {
+    sfInitInProgress = true;
     sfWantGo = true;
     sfLastGoFen = fen;
     send('uci');
