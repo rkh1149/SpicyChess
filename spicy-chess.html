@@ -511,6 +511,11 @@ let boardTouchInputBound = null;
 const squareHandlerBindings = new Map();
 let helpPreviewMove = { from: null, to: null };
 let helpPreviewTimer = null;
+const prefersTapInput = (typeof window !== 'undefined') && (
+  (!!window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches) ||
+  ('ontouchstart' in window) ||
+  ((navigator && Number(navigator.maxTouchPoints)) > 0)
+);
 
 const openingBookLines = [
   ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5'],
@@ -1982,7 +1987,7 @@ function startGame() {
   resolveRealisticPieces((pieceSet) => {
     const useInline = !pieceSet;
     boardConfig = {
-      draggable: true,
+      draggable: !prefersTapInput,
       position: 'start',
       onDragStart: onDragStart,
       onMouseoverSquare: onMouseoverSquare,
@@ -2092,8 +2097,11 @@ function onMouseoutSquare() {
 }
 
 function onDrop(source, target, piece) {
-  resetTouchMoveSelection();
+  // On touch devices, a tap can trigger a synthetic drop on the same square.
+  // Do not clear tap-selection state for source==target; let tap-to-move continue.
+  if (source === target) return 'snapback';
   if (!attemptPlayerMove(source, target)) return 'snapback';
+  resetTouchMoveSelection();
   return;
 }
 
