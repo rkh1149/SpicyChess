@@ -340,9 +340,9 @@
         <button id="askHelpBtn" style="display:none;" title="Ask for your best next move">Ask Best Move</button>
         <div id="touchHint">Touch controls: tap a piece, then tap its destination square.</div>
         <div id="eloBoardPanel">
-          <div><strong>White ELO:</strong> <span id="eloWhite">1200</span></div>
-          <div><strong>Black ELO:</strong> <span id="eloBlack">1200</span></div>
-          <div id="eloSummary">ELO updates when a game finishes.</div>
+          <div><strong>White Game Rating:</strong> <span id="eloWhite">--</span></div>
+          <div><strong>Black Game Rating:</strong> <span id="eloBlack">--</span></div>
+          <div id="eloSummary">Game Rating appears after post-game analysis.</div>
         </div>
       </div>
     </div>
@@ -495,8 +495,11 @@ let demoDecisionResolver = null;
 let demoDragState = { active: false, dx: 0, dy: 0 };
 let gameResultHandled = false;
 let gameStatusOverride = null;   // { text, kind }
-let eloRatings = { w: 1200, b: 1200 };
-const eloK = 24;
+let gameRatings = {
+  w: { rating: null, accuracy: null, avgCpl: null, moves: 0 },
+  b: { rating: null, accuracy: null, avgCpl: null, moves: 0 }
+};
+let gameSessionId = 0;
 let gameActive = false;
 let timeControl = 'rapid';       // blitz | rapid | classical
 const timeControlSeconds = { blitz: 300, rapid: 600, classical: Infinity };
@@ -825,15 +828,15 @@ function onTimeExpired(colorFlagged) {
   if (!game || gameResultHandled) return;
   const winnerColor = (colorFlagged === 'w') ? 'b' : 'w';
   const reason = `${winnerColor === 'w' ? 'White' : 'Black'} wins on time`;
-  const scoreWhite = (winnerColor === 'w') ? 1 : 0;
-  const info = applyEndgameElo(scoreWhite, reason);
+  gameStatusOverride = { text: `State: ${winnerColor === 'w' ? 'White' : 'Black'} won on time`, kind: 'state-win' };
   stopClockTicker();
   gameActive = false;
-  gameStatusOverride = { text: `State: ${winnerColor === 'w' ? 'White' : 'Black'} won on time`, kind: 'state-win' };
-  if (info) {
-    log(reason + '.');
-    alert(info.summary);
-  }
+  gameResultHandled = true;
+  log(reason + '.');
+  const scoreWhite = (winnerColor === 'w') ? 1 : 0;
+  finalizeGameRatings(reason, scoreWhite, gameSessionId).catch((err) => {
+    console.error('Game rating analysis failed:', err);
+  });
   updateTurnInfo();
 }
 
@@ -1222,17 +1225,17 @@ function showEndgameOverlay(title, body) {
   wrap.classList.add('show');
 }
 
-function expectedEloScore(rA, rB) {
-  return 1 / (1 + Math.pow(10, (rB - rA) / 400));
-}
+function clampNumber(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 function updateEloBoardPanel(summaryText) {
   const w = document.getElementById('eloWhite');
   const b = document.getElementById('eloBlack');
   const s = document.getElementById('eloSummary');
-  if (w) w.textContent = String(Math.round(eloRatings.w));
-  if (b) b.textContent = String(Math.round(eloRatings.b));
-  if (s) s.textContent = summaryText || 'ELO updates when a game finishes.';
+  const wr = gameRatings.w && Number.isFinite(gameRatings.w.rating) ? String(Math.round(gameRatings.w.rating)) : '--';
+  const br = gameRatings.b && Number.isFinite(gameRatings.b.rating) ? String(Math.round(gameRatings.b.rating)) : '--';
+  if (w) w.textContent = wr;
+  if (b) b.textContent = br;
+  if (s) s.textContent = summaryText || 'Game Rating appears after post-game analysis.';
 }
 
 function sideOwnerLabel(colorCode) {
@@ -1242,27 +1245,200 @@ function sideOwnerLabel(colorCode) {
   return `${sideWord} (${opponentType === 'stockfish' ? 'Stockfish' : 'Computer'})`;
 }
 
-function applyEndgameElo(scoreWhite, reasonText) {
-  if (gameResultHandled) return null;
-  const scoreBlack = 1 - scoreWhite;
-  const beforeW = eloRatings.w;
-  const beforeB = eloRatings.b;
-  const expW = expectedEloScore(beforeW, beforeB);
-  const expB = expectedEloScore(beforeB, beforeW);
-  eloRatings.w = beforeW + eloK * (scoreWhite - expW);
-  eloRatings.b = beforeB + eloK * (scoreBlack - expB);
-  const deltaW = Math.round(eloRatings.w - beforeW);
-  const deltaB = Math.round(eloRatings.b - beforeB);
-  gameResultHandled = true;
+function scoreFromMatePly(matePly) {
+  const sign = matePly >= 0 ? 1 : -1;
+  const dist = Math.abs(matePly);
+  return sign * (2000 - Math.min(1900, dist * 10));
+}
 
-  const scoreLine = (scoreWhite === 1) ? 'White won' : (scoreWhite === 0) ? 'Black won' : 'Draw';
-  const summary = `${reasonText}. ${scoreLine}. ${sideOwnerLabel('w')}: ${Math.round(eloRatings.w)} (${deltaW >= 0 ? '+' : ''}${deltaW}), ${sideOwnerLabel('b')}: ${Math.round(eloRatings.b)} (${deltaB >= 0 ? '+' : ''}${deltaB}).`;
+function parseUciScore(line) {
+  const cp = line.match(/\bscore\s+cp\s+(-?\d+)/);
+  if (cp) return parseInt(cp[1], 10);
+  const mate = line.match(/\bscore\s+mate\s+(-?\d+)/);
+  if (mate) return scoreFromMatePly(parseInt(mate[1], 10));
+  return null;
+}
+
+function createStockfishWorkerForAnalysis() {
+  try {
+    if (typeof STOCKFISH === 'function') {
+      return STOCKFISH();
+    }
+  } catch (_) {}
+  if (window.Worker) {
+    try { return new Worker('./stockfish.worker.js'); } catch (_) {}
+    try { return new Worker('./stockfish.js'); } catch (_) {}
+  }
+  return null;
+}
+
+function createStockfishAnalyzer() {
+  const worker = createStockfishWorkerForAnalysis();
+  if (!worker) return Promise.resolve(null);
+  return new Promise((resolveOuter) => {
+    let currentEval = null;
+    let settled = false;
+    let uciTimer = null;
+    let readyTimer = null;
+
+    const send = (msg) => {
+      try { worker.postMessage(String(msg)); } catch (_) {}
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      try { worker.terminate && worker.terminate(); } catch (_) {}
+      resolveOuter(null);
+    };
+    const finish = (api) => {
+      if (settled) return;
+      settled = true;
+      resolveOuter(api);
+    };
+
+    const evaluateFen = (fen, movetimeMs = 130, depth = 10) => {
+      if (!fen) return Promise.resolve(0);
+      if (currentEval) {
+        try { send('stop'); } catch (_) {}
+      }
+      return new Promise((resolveEval) => {
+        currentEval = { resolve: resolveEval, score: 0 };
+        send(`position fen ${fen}`);
+        send(`go movetime ${Math.max(80, movetimeMs | 0)} depth ${Math.max(6, depth | 0)}`);
+        setTimeout(() => {
+          if (!currentEval) return;
+          const out = currentEval.score || 0;
+          currentEval = null;
+          resolveEval(out);
+          try { send('stop'); } catch (_) {}
+        }, Math.max(220, movetimeMs + 420));
+      });
+    };
+
+    worker.onmessage = (e) => {
+      const raw = e && e.data;
+      const line = (typeof raw === 'string') ? raw : String(raw || '');
+      if (!line) return;
+      if (line.includes('uciok')) {
+        if (uciTimer) clearTimeout(uciTimer);
+        send('setoption name MultiPV value 1');
+        send('isready');
+        readyTimer = setTimeout(() => fail(), 3500);
+        return;
+      }
+      if (line.includes('readyok')) {
+        if (readyTimer) clearTimeout(readyTimer);
+        finish({
+          evaluateFen,
+          close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
+        });
+        return;
+      }
+      if (currentEval && line.startsWith('info ')) {
+        const sc = parseUciScore(line);
+        if (sc !== null) currentEval.score = sc;
+        return;
+      }
+      if (currentEval && line.startsWith('bestmove')) {
+        const out = currentEval.score || 0;
+        const cb = currentEval.resolve;
+        currentEval = null;
+        cb(out);
+      }
+    };
+    worker.onerror = () => fail();
+    worker.onmessageerror = () => fail();
+    send('uci');
+    uciTimer = setTimeout(() => fail(), 3500);
+  });
+}
+
+function turnFromFen(fen) {
+  const parts = String(fen || '').split(' ');
+  return parts[1] === 'b' ? 'b' : 'w';
+}
+
+function buildFallbackGameRatings(scoreWhite) {
+  const whiteMoves = moveHistory.reduce((n, _, i) => n + (i > 0 && i % 2 === 1 ? 1 : 0), 0);
+  const blackMoves = moveHistory.reduce((n, _, i) => n + (i > 0 && i % 2 === 0 ? 1 : 0), 0);
+  const bonusW = scoreWhite === 1 ? 30 : scoreWhite === 0 ? -30 : 0;
+  const bonusB = scoreWhite === 0 ? 30 : scoreWhite === 1 ? -30 : 0;
+  return {
+    w: { rating: clampNumber(1450 + bonusW, 500, 3200), accuracy: 75 + (bonusW / 3), avgCpl: null, moves: whiteMoves },
+    b: { rating: clampNumber(1450 + bonusB, 500, 3200), accuracy: 75 + (bonusB / 3), avgCpl: null, moves: blackMoves },
+    source: 'fallback'
+  };
+}
+
+function cplToAccuracy(avgCpl) {
+  return clampNumber(100 - (avgCpl * 0.12), 1, 99.9);
+}
+
+function accuracyToGameRating(acc) {
+  return Math.round(clampNumber(450 + acc * 23.5, 400, 3200));
+}
+
+async function analyzeGameRatingsWithStockfish(fens) {
+  if (!Array.isArray(fens) || fens.length < 2) return null;
+  const analyzer = await createStockfishAnalyzer();
+  if (!analyzer) return null;
+  const stats = {
+    w: { cpl: 0, moves: 0 },
+    b: { cpl: 0, moves: 0 }
+  };
+  try {
+    for (let i = 1; i < fens.length; i++) {
+      const beforeFen = fens[i - 1];
+      const afterFen = fens[i];
+      const mover = turnFromFen(beforeFen);
+      const bestBefore = await analyzer.evaluateFen(beforeFen, 125, 10);
+      const afterRaw = await analyzer.evaluateFen(afterFen, 105, 9);
+      const afterFromMover = -afterRaw;
+      const cpl = clampNumber(Math.max(0, bestBefore - afterFromMover), 0, 600);
+      stats[mover].cpl += cpl;
+      stats[mover].moves += 1;
+    }
+  } finally {
+    analyzer.close();
+  }
+  const build = (color) => {
+    const moves = stats[color].moves || 0;
+    const avgCpl = moves > 0 ? (stats[color].cpl / moves) : 120;
+    const accuracy = cplToAccuracy(avgCpl);
+    const rating = accuracyToGameRating(accuracy);
+    return { rating, accuracy, avgCpl, moves };
+  };
+  return { w: build('w'), b: build('b'), source: 'stockfish' };
+}
+
+function formatSideGameRatingLine(colorCode) {
+  const label = sideOwnerLabel(colorCode);
+  const side = gameRatings[colorCode] || {};
+  const rt = Number.isFinite(side.rating) ? Math.round(side.rating) : '--';
+  const acc = Number.isFinite(side.accuracy) ? `${side.accuracy.toFixed(1)}%` : '--';
+  return `${label} Game Rating: ${rt} (Accuracy ${acc})`;
+}
+
+async function finalizeGameRatings(reasonText, scoreWhite, sessionIdAtEnd) {
+  const fens = moveHistory.slice();
+  updateEloBoardPanel(`${reasonText}. Analyzing game with Stockfish...`);
+  showEndgameOverlay('Game Finished', `${reasonText}. Running post-game analysis...`);
+  const analyzed = await analyzeGameRatingsWithStockfish(fens);
+  if (sessionIdAtEnd !== gameSessionId) return;
+
+  if (analyzed) gameRatings = analyzed;
+  else gameRatings = buildFallbackGameRatings(scoreWhite);
+
+  const sourceText = analyzed ? 'Stockfish analysis complete.' : 'Stockfish unavailable; using fallback estimate.';
+  const summary = `${reasonText}. ${formatSideGameRatingLine('w')}. ${formatSideGameRatingLine('b')}. ${sourceText}`;
   updateEloBoardPanel(summary);
   showEndgameOverlay('Game Finished', summary);
-  return { summary, deltaW, deltaB };
+  log(summary);
+  alert(summary);
 }
 
 function handleGameEnd(reasonCode, lastMoverColor) {
+  if (gameResultHandled) return;
   let scoreWhite = 0.5;
   let reason = 'Game ended';
   let statusKind = 'state-draw';
@@ -1291,13 +1467,19 @@ function handleGameEnd(reasonCode, lastMoverColor) {
     text: `State: ${reason}`,
     kind: statusKind
   };
-  const info = applyEndgameElo(scoreWhite, reason);
   stopClockTicker();
   gameActive = false;
-  if (info) {
-    log(reason + '.');
-    alert(info.summary);
-  }
+  gameResultHandled = true;
+  log(reason + '.');
+  const sessionAtEnd = gameSessionId;
+  finalizeGameRatings(reason, scoreWhite, sessionAtEnd).catch((err) => {
+    console.error('Game rating analysis failed:', err);
+    if (sessionAtEnd !== gameSessionId) return;
+    gameRatings = buildFallbackGameRatings(scoreWhite);
+    const summary = `${reason}. ${formatSideGameRatingLine('w')}. ${formatSideGameRatingLine('b')}.`;
+    updateEloBoardPanel(summary);
+    showEndgameOverlay('Game Finished', summary);
+  });
 }
 
 function setDemoPreview(from, to) {
@@ -1641,6 +1823,7 @@ function forceStockfishFallbackMove(reasonText) {
    Start game & board hooks
    ========================= */
 function startGame() {
+  gameSessionId += 1;
   closeDemoOverlay();
   hideEndgameOverlay();
   clearHelpPreview();
@@ -1857,6 +2040,10 @@ function startGame() {
   halfMoveCount = 0;
   gameResultHandled = false;
   gameStatusOverride = null;
+  gameRatings = {
+    w: { rating: null, accuracy: null, avgCpl: null, moves: 0 },
+    b: { rating: null, accuracy: null, avgCpl: null, moves: 0 }
+  };
   gameActive = true;
   lastMoveSquares = { from: null, to: null };
   legalTargetSquares = [];
