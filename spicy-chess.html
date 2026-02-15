@@ -744,6 +744,8 @@ if (helpSel) {
 if (sideSel) {
   sideSel.addEventListener('change', () => {
     userSide = sideSel.value;
+    setupBoardLabels();
+    if (board) board.orientation(userSide === 'black' ? 'black' : 'white');
     updateStatusBar();
   });
 }
@@ -1595,8 +1597,11 @@ function setupBoardLabels() {
   if (!r || !f) return;
   r.innerHTML = '';
   f.innerHTML = '';
-  for (let i = 1; i <= 8; i++) { const d = document.createElement('div'); d.textContent = String(i); r.appendChild(d); }
-  for (const ch of ['a','b','c','d','e','f','g','h']) { const d = document.createElement('div'); d.textContent = ch; f.appendChild(d); }
+  const isBlackBottom = userSide === 'black';
+  const ranks = isBlackBottom ? [8,7,6,5,4,3,2,1] : [1,2,3,4,5,6,7,8];
+  const files = isBlackBottom ? ['h','g','f','e','d','c','b','a'] : ['a','b','c','d','e','f','g','h'];
+  for (const rank of ranks) { const d = document.createElement('div'); d.textContent = String(rank); r.appendChild(d); }
+  for (const ch of files) { const d = document.createElement('div'); d.textContent = ch; f.appendChild(d); }
 }
 
 function configureStockfishForLevel(worker) {
@@ -1644,6 +1649,7 @@ function startGame() {
   modeName = document.getElementById('modeSelect').value;
   modeConfig = gameModes[modeName];
   userSide = (document.getElementById('sideSelect')?.value || 'white');
+  setupBoardLabels();
   opponentType = (document.getElementById('opponentSelect')?.value || 'local');
   aiLevel = (document.getElementById('levelSelect')?.value || 'intermediate');
   helpMode = (document.getElementById('helpSelect')?.value || 'off');
