@@ -294,7 +294,7 @@
       .control-grid { grid-template-columns: 1fr; }
     }
   </style>
-  <!-- Load local Stockfish wrapper; if present it exposes global STOCKFISH() factory -->
+  <!-- Load local Stockfish wrapper/factory -->
   <script src="./stockfish.js" defer></script>
 </head>
 <body>
@@ -369,7 +369,7 @@
             <label for="opponentSelect">Opponent</label>
             <select id="opponentSelect" title="Who plays the other side?">
               <option value="local">Local AI</option>
-              <option value="stockfish">Stockfish (local)</option>
+              <option value="stockfish">Stockfish (single-thread)</option>
             </select>
           </div>
           <div class="control-item">
@@ -404,7 +404,7 @@
           <button id="rematchBtn" title="Start a new game with colors swapped">Rematch (Swap Sides)</button>
           <button id="demoBtn" title="Run a scripted showcase of special moves">Run Special Moves Demo</button>
         </div>
-        <div class="note" id="opponentHint">Opponent: Local greedy AI. Choose “Stockfish” for a real engine.</div>
+        <div class="note" id="opponentHint">Opponent: Local greedy AI. Choose “Stockfish (single-thread)” for engine play.</div>
         <div class="note">Select a mode, then Start Game. Special buttons appear based on the mode.</div>
       </div>
 
@@ -705,7 +705,7 @@ function updateOpponentHint() {
   if (!hint) { updateStatusBar(); return; }
   const lvl = getAiLevelConfig().label;
   if (opponentType === 'stockfish') {
-    hint.textContent = `Opponent: Stockfish (local) • Level: ${lvl}.`;
+    hint.textContent = `Opponent: Stockfish (single-thread) • Level: ${lvl}.`;
   } else {
     hint.textContent = `Opponent: Local AI • Level: ${lvl}.`;
   }
@@ -1296,21 +1296,56 @@ function canRunThreadedStockfish() {
   return typeof SharedArrayBuffer !== 'undefined';
 }
 
+function adaptEngineToWorkerLike(engine) {
+  if (!engine) return null;
+  if (typeof engine.postMessage === 'function' && (typeof engine.onmessage !== 'undefined' || typeof engine.addEventListener === 'function')) {
+    return engine;
+  }
+  if (typeof engine.postMessage === 'function' && typeof engine.addMessageListener === 'function') {
+    const wrapped = {
+      onmessage: null,
+      onerror: null,
+      onmessageerror: null,
+      postMessage: (msg) => {
+        try { engine.postMessage(String(msg)); } catch (err) {
+          if (wrapped.onerror) wrapped.onerror(err);
+        }
+      },
+      terminate: () => {
+        try {
+          if (wrapped._listener && typeof engine.removeMessageListener === 'function') {
+            engine.removeMessageListener(wrapped._listener);
+          }
+        } catch (_) {}
+        try { engine.terminate && engine.terminate(); } catch (_) {}
+      },
+      _listener: null
+    };
+    wrapped._listener = (line) => {
+      if (!wrapped.onmessage) return;
+      try { wrapped.onmessage({ data: String(line) }); } catch (_) {}
+    };
+    try { engine.addMessageListener(wrapped._listener); } catch (_) {}
+    return wrapped;
+  }
+  return engine;
+}
+
 async function createStockfishWorkerForAnalysis() {
-  if (!canRunThreadedStockfish()) return null;
   try {
     const sfFactory = getStockfishFactory();
     if (sfFactory) {
       const maybe = sfFactory();
       if (maybe && typeof maybe.then === 'function') {
-        return await maybe;
+        return adaptEngineToWorkerLike(await maybe);
       }
-      return maybe;
+      return adaptEngineToWorkerLike(maybe);
     }
   } catch (_) {}
+  if (!canRunThreadedStockfish()) return null;
   if (window.Worker) {
-    try { return new Worker('./stockfish.worker.js'); } catch (_) {}
-    try { return new Worker('./stockfish.js'); } catch (_) {}
+    try { return adaptEngineToWorkerLike(new Worker('./stockfish.worker.js')); } catch (_) {}
+    try { return adaptEngineToWorkerLike(new Worker('./stockfish.js')); } catch (_) {}
   }
   return null;
 }
@@ -1636,7 +1671,7 @@ function updateTurnInfo() {
   const sideTxt = `You are ${userSide === 'black' ? 'Black' : 'White'}`;
   const levelTxt = `Level: ${getAiLevelConfig().label}`;
   let oppTxt;
-  if (opponentType === 'stockfish') oppTxt = 'Opponent: Stockfish (local)';
+  if (opponentType === 'stockfish') oppTxt = 'Opponent: Stockfish (single-thread)';
   else oppTxt = 'Opponent: Local AI';
   document.getElementById('turnInfo').textContent = `${t} to move • ${sideTxt} • ${oppTxt} • ${levelTxt}`;
   document.getElementById('specialStatus').textContent = buildSpecialStatusText();
@@ -1909,14 +1944,6 @@ function startGame() {
 
   // Stockfish worker setup if needed
   if (opponentType === 'stockfish') {
-    if (!canRunThreadedStockfish()) {
-      sfDisabled = true;
-      opponentType = 'local';
-      const oppSelNoSab = document.getElementById('opponentSelect');
-      if (oppSelNoSab) oppSelNoSab.value = 'local';
-      updateOpponentHint();
-      log('Stockfish disabled: this browser/runtime does not provide SharedArrayBuffer. Using Local AI.');
-    } else {
     const startSessionId = gameSessionId;
     let sfRecoveryAttempts = 0;
     const sfMaxRecoveryAttempts = 3;
@@ -2029,10 +2056,10 @@ function startGame() {
           return false;
         }
       };
-      if (window.Worker && failedSource !== 'worker-js') {
+      if (canRunThreadedStockfish() && window.Worker && failedSource !== 'worker-js') {
         if (tryBind(new Worker('./stockfish.js'), '[SF] Recovery worker started (stockfish.js)', 'worker-js')) return;
       }
-      if (window.Worker && failedSource !== 'worker-workerjs') {
+      if (canRunThreadedStockfish() && window.Worker && failedSource !== 'worker-workerjs') {
         if (tryBind(new Worker('./stockfish.worker.js'), '[SF] Recovery worker started (stockfish.worker.js)', 'worker-workerjs')) return;
       }
       const sfFactory = getStockfishFactory();
@@ -2099,20 +2126,23 @@ function startGame() {
 
     const bindAndStartWorker = (worker, label, source = 'unknown') => {
       if (!worker) throw new Error('Stockfish worker not created');
+      const adapted = adaptEngineToWorkerLike(worker);
+      if (!adapted) throw new Error('Stockfish engine could not be adapted');
       if (startSessionId !== gameSessionId) {
-        try { worker.terminate && worker.terminate(); } catch (_) {}
+        try { adapted.terminate && adapted.terminate(); } catch (_) {}
         return;
       }
-      worker._sfSource = source;
-      sfWorker = worker;
+      adapted._sfSource = source;
+      sfWorker = adapted;
       sfInitInProgress = true;
       console.log(label);
-      startSF(worker);
+      startSF(adapted);
     };
 
     const tryWorkerStartupFallback = () => {
       if (startSessionId !== gameSessionId) return;
       if (sfWorker || sfReady) return;
+      if (!canRunThreadedStockfish()) return;
       if (!window.Worker) return;
       try {
         bindAndStartWorker(new Worker('./stockfish.worker.js'), '[SF] Fallback worker started (stockfish.worker.js)', 'worker-workerjs');
@@ -2128,7 +2158,15 @@ function startGame() {
     try {
       const sfFactory = getStockfishFactory();
       if (sfFactory) {
-        const maybeEngine = sfFactory();
+        let maybeEngine = null;
+        try {
+          maybeEngine = sfFactory();
+        } catch (factoryErr) {
+          if (!canRunThreadedStockfish()) {
+            throw new Error('Installed Stockfish build requires SharedArrayBuffer. Use a non-threaded stockfish.js build for GitHub Pages.');
+          }
+          throw factoryErr;
+        }
         if (maybeEngine && typeof maybeEngine.then === 'function') {
           sfInitInProgress = true;
           sfInitStartedTs = Date.now();
@@ -2159,19 +2197,31 @@ function startGame() {
         } else {
           bindAndStartWorker(maybeEngine, '[SF] Engine created via STOCKFISH() factory', 'factory');
         }
-      } else if (window.Worker) {
+      } else if (canRunThreadedStockfish() && window.Worker) {
         try {
           bindAndStartWorker(new Worker('./stockfish.worker.js'), '[SF] Worker started (stockfish.worker.js)', 'worker-workerjs');
         } catch (_) {
           bindAndStartWorker(new Worker('./stockfish.js'), '[SF] Worker started (stockfish.js)', 'worker-js');
         }
       } else {
-        throw new Error('Web Workers not supported');
+        throw new Error('No compatible Stockfish engine found (factory missing, and threaded workers unavailable).');
       }
     } catch (err) {
       sfInitInProgress = false;
-      console.error('Failed to start Stockfish. Ensure JS & WASM are next to HTML and served over http(s).', err);
-      alert('Could not start Stockfish worker. Check console for details.');
+      sfInitStartedTs = 0;
+      console.error('Failed to start Stockfish. Ensure correct build/files are present.', err);
+      if (!canRunThreadedStockfish()) {
+        sfDisabled = true;
+        if (opponentType === 'stockfish') {
+          opponentType = 'local';
+          const oppSelNoSab = document.getElementById('opponentSelect');
+          if (oppSelNoSab) oppSelNoSab.value = 'local';
+          updateOpponentHint();
+        }
+        log('Stockfish disabled: current build needs SharedArrayBuffer. Install non-threaded stockfish.js for GitHub Pages.');
+      } else {
+        alert('Could not start Stockfish worker. Check console for details.');
+      }
     }
 
     // Diagnostic: only ping WASM when served via http(s)
@@ -2179,7 +2229,6 @@ function startGame() {
       fetch('./stockfish.wasm', { method: 'HEAD' }).then(r => {
         if (!r.ok) console.warn('stockfish.wasm HEAD status:', r.status);
       }).catch(err => console.warn('stockfish.wasm not reachable:', err));
-    }
     }
   }
 
