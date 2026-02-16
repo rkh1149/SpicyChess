@@ -6,13 +6,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <!-- tiny inline favicon to avoid 404 -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>♟️</text></svg>">
-  <!-- jQuery (required for Chessboard.js 0.3.0) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
-  <!-- chessboard.js 0.3.0 (jQuery build, stable) -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard.js/0.3.0/chessboard-0.3.0.min.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard.js/0.3.0/chessboard-0.3.0.min.js"></script>
-  <!-- chess.js (rules, UMD build exposing global `Chess`) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <!-- Local dependencies for offline/self-contained operation -->
+  <script src="./vendor/jquery.min.js"></script>
+  <link rel="stylesheet" href="./vendor/chessboard-0.3.0.min.css" />
+  <script src="./vendor/chessboard-0.3.0.min.js"></script>
+  <script src="./vendor/chess.min.js"></script>
   <style>
     :root {
       --bg0: #fcfbf6;
@@ -481,6 +479,8 @@ let sfLastGoFen = '';            // FEN that current Stockfish search was starte
 let sfLastGoTs = 0;
 let sfBestmoveTimer = null;
 let sfInitInProgress = false;
+let sfInitStartedTs = 0;
+let sfDisabled = false;
 let aiServerUrl = '';            // (unused here—kept for compatibility)
 
 let moveHistory = [];            // list of FENs (for Back in Time)
@@ -1282,10 +1282,26 @@ function parseUciScore(line) {
   return null;
 }
 
+function getStockfishFactory() {
+  if (typeof STOCKFISH === 'function') return STOCKFISH;
+  if (typeof Stockfish === 'function') return Stockfish;
+  if (typeof window !== 'undefined') {
+    if (typeof window.STOCKFISH === 'function') return window.STOCKFISH;
+    if (typeof window.Stockfish === 'function') return window.Stockfish;
+  }
+  return null;
+}
+
+function canRunThreadedStockfish() {
+  return typeof SharedArrayBuffer !== 'undefined';
+}
+
 async function createStockfishWorkerForAnalysis() {
+  if (!canRunThreadedStockfish()) return null;
   try {
-    if (typeof STOCKFISH === 'function') {
-      const maybe = STOCKFISH();
+    const sfFactory = getStockfishFactory();
+    if (sfFactory) {
+      const maybe = sfFactory();
       if (maybe && typeof maybe.then === 'function') {
         return await maybe;
       }
@@ -1349,9 +1365,15 @@ function createStockfishAnalyzer() {
         if (line.includes('uciok')) {
           if (uciTimer) clearTimeout(uciTimer);
           send('setoption name MultiPV value 1');
-          send('isready');
+          // Some builds are slow or omit readyok; proceed after uciok as fallback.
           if (readyTimer) clearTimeout(readyTimer);
-          readyTimer = setTimeout(() => fail(), 9000);
+          readyTimer = setTimeout(() => {
+            finish({
+              evaluateFen,
+              close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
+            });
+          }, 1200);
+          send('isready');
           continue;
         }
         if (line.includes('readyok')) {
@@ -1736,14 +1758,12 @@ function loadScript(src, onload, onerror) {
 }
 function tryLoadChessboard(next) {
   const candidates = [
-    'https://cdnjs.cloudflare.com/ajax/libs/chessboard.js/0.3.0/chessboard-0.3.0.min.js',
-    'https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js',
-    'https://cdn.jsdelivr.net/npm/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js'
+    './vendor/chessboard-0.3.0.min.js'
   ];
   let i = 0;
   const tryNext = () => {
     if (typeof Chessboard !== 'undefined') { return next && next(); }
-    if (i >= candidates.length) { alert('Could not load Chessboard.js.'); return; }
+    if (i >= candidates.length) { alert('Could not load local Chessboard.js (./vendor/chessboard-0.3.0.min.js).'); return; }
     const url = candidates[i++];
     loadScript(url, () => setTimeout(() => {
       if (typeof Chessboard !== 'undefined') { next && next(); }
@@ -1830,6 +1850,7 @@ function sendStockfishGo(worker, fen) {
   if (!worker || !fen) return;
   const send = worker._send ? worker._send : (m)=>{ try{ worker.postMessage(m);}catch(_){ } };
   const cfg = getAiLevelConfig().stockfish;
+  sfInitStartedTs = 0;
   sfLastGoFen = fen;
   sfLastGoTs = Date.now();
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
@@ -1842,10 +1863,11 @@ function sendStockfishGo(worker, fen) {
 
 function forceStockfishFallbackMove(reasonText) {
   if (!game || game.game_over()) return;
-  if (opponentType !== 'stockfish') return;
+  if (opponentType !== 'stockfish' && !sfDisabled) return;
   const myColor = getUserColorCode();
   if (game.turn() === myColor) return;
   sfInitInProgress = false;
+  sfInitStartedTs = 0;
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
   log(`${reasonText}; using local fallback move.`);
   aiMoveLocalGreedy();
@@ -1881,11 +1903,23 @@ function startGame() {
   sfLastGoFen = '';
   sfLastGoTs = 0;
   sfInitInProgress = false;
+  sfInitStartedTs = 0;
+  sfDisabled = false;
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
 
   // Stockfish worker setup if needed
   if (opponentType === 'stockfish') {
+    if (!canRunThreadedStockfish()) {
+      sfDisabled = true;
+      opponentType = 'local';
+      const oppSelNoSab = document.getElementById('opponentSelect');
+      if (oppSelNoSab) oppSelNoSab.value = 'local';
+      updateOpponentHint();
+      log('Stockfish disabled: this browser/runtime does not provide SharedArrayBuffer. Using Local AI.');
+    } else {
     const startSessionId = gameSessionId;
+    let sfRecoveryAttempts = 0;
+    const sfMaxRecoveryAttempts = 3;
     function attachSFHandlers(worker){
       worker.onmessage = (e) => {
         const lines = normalizeUciLines(e);
@@ -1894,12 +1928,21 @@ function startGame() {
           console.debug('[SF line]', line);
           if (line.includes('uciok')) {
             configureStockfishForLevel(worker);
-            if (!sfReady) { try { worker.postMessage('isready'); } catch(_) {} }
+            // Some wrappers never emit readyok; treat uciok as ready enough to search.
+            sfReady = true;
+            sfInitInProgress = false;
+            sfInitStartedTs = 0;
+            if (!sfWantGo) { try { worker.postMessage('isready'); } catch(_) {} }
+            if (sfWantGo && game) {
+              sfWantGo = false;
+              sendStockfishGo(worker, game.fen());
+            }
             continue;
           }
           if (line.includes('readyok')) {
             sfReady = true;
             sfInitInProgress = false;
+            sfInitStartedTs = 0;
             console.log('[SF] readyok');
             if (sfWantGo && game) {
               sfWantGo = false;
@@ -1950,15 +1993,85 @@ function startGame() {
       }
     }
 
+    const recoverStockfishAfterFailure = (failedSource, reasonText) => {
+      if (startSessionId !== gameSessionId) return;
+      if (sfDisabled) return;
+      if (sfReady) return;
+      if (sfRecoveryAttempts >= sfMaxRecoveryAttempts) {
+        console.warn('[SF] Recovery exhausted:', reasonText);
+        sfDisabled = true;
+        sfInitInProgress = false;
+        sfInitStartedTs = 0;
+        if (sfWorker) {
+          try { sfWorker.terminate && sfWorker.terminate(); } catch (_) {}
+          sfWorker = null;
+        }
+        if (opponentType === 'stockfish') {
+          opponentType = 'local';
+          const oppSel = document.getElementById('opponentSelect');
+          if (oppSel) oppSel.value = 'local';
+          updateOpponentHint();
+          updateTurnInfo();
+        }
+        log('Stockfish unavailable; switched to Local AI for this game.');
+        forceStockfishFallbackMove('Stockfish engine failed; using local fallback');
+        return;
+      }
+      sfRecoveryAttempts += 1;
+      sfInitInProgress = false;
+      sfInitStartedTs = 0;
+      const tryBind = (w, label, source) => {
+        try {
+          bindAndStartWorker(w, label, source);
+          return true;
+        } catch (err) {
+          console.warn('[SF] Recovery candidate failed:', label, err);
+          return false;
+        }
+      };
+      if (window.Worker && failedSource !== 'worker-js') {
+        if (tryBind(new Worker('./stockfish.js'), '[SF] Recovery worker started (stockfish.js)', 'worker-js')) return;
+      }
+      if (window.Worker && failedSource !== 'worker-workerjs') {
+        if (tryBind(new Worker('./stockfish.worker.js'), '[SF] Recovery worker started (stockfish.worker.js)', 'worker-workerjs')) return;
+      }
+      const sfFactory = getStockfishFactory();
+      if (sfFactory && failedSource !== 'factory') {
+        try {
+          const maybe = sfFactory();
+          if (maybe && typeof maybe.then === 'function') {
+            maybe.then((w) => {
+              if (!w || startSessionId !== gameSessionId || sfReady) return;
+              tryBind(w, '[SF] Recovery engine resolved via STOCKFISH() factory', 'factory');
+            }).catch((err) => {
+              console.warn('[SF] Recovery STOCKFISH() failed:', err);
+            });
+            return;
+          }
+          if (maybe && tryBind(maybe, '[SF] Recovery engine via STOCKFISH() factory', 'factory')) return;
+        } catch (err) {
+          console.warn('[SF] Recovery STOCKFISH() threw:', err);
+        }
+      }
+      forceStockfishFallbackMove('Stockfish recovery failed; using local fallback');
+    };
+
     function startSF(worker){
       attachSFHandlers(worker);
+      sfInitStartedTs = Date.now();
 
       // Error + messageerror diagnostics
       worker.onerror = (e) => {
         console.error('[SF worker.onerror]', e.message || e);
+        if (sfWorker === worker) sfWorker = null;
+        try { worker.terminate && worker.terminate(); } catch (_) {}
+        recoverStockfishAfterFailure(worker._sfSource || 'unknown', 'worker error');
       };
       worker.onmessageerror = (e) => {
         console.error('[SF worker.onmessageerror]', e);
+        if (sfWorker === worker) sfWorker = null;
+        try { worker.terminate && worker.terminate(); } catch (_) {}
+        recoverStockfishAfterFailure(worker._sfSource || 'unknown', 'worker messageerror');
       };
 
       // Send UCI init in multiple formats to cover different builds
@@ -1968,47 +2081,89 @@ function startGame() {
       // Kick readiness now and keep pinging until ready (max 10s)
       const startTs = Date.now();
       const ping = () => {
+        if (sfDisabled || startSessionId !== gameSessionId) return;
         if (sfReady) return; // stop when ready
         const elapsed = Date.now() - startTs;
-        if (elapsed > 15000) { console.warn('[SF] ready ping timeout (>15s)'); sfInitInProgress = false; return; }
+        if (elapsed > 15000) {
+          console.warn('[SF] ready ping timeout (>15s)');
+          if (sfWorker === worker) sfWorker = null;
+          try { worker.terminate && worker.terminate(); } catch (_) {}
+          recoverStockfishAfterFailure(worker._sfSource || 'unknown', 'ready ping timeout');
+          return;
+        }
         try { worker.postMessage('isready'); } catch(_) {}
         setTimeout(ping, 300);
       };
       setTimeout(ping, 50);
     }
 
-    const bindAndStartWorker = (worker, label) => {
+    const bindAndStartWorker = (worker, label, source = 'unknown') => {
       if (!worker) throw new Error('Stockfish worker not created');
       if (startSessionId !== gameSessionId) {
         try { worker.terminate && worker.terminate(); } catch (_) {}
         return;
       }
+      worker._sfSource = source;
       sfWorker = worker;
       sfInitInProgress = true;
       console.log(label);
       startSF(worker);
     };
 
+    const tryWorkerStartupFallback = () => {
+      if (startSessionId !== gameSessionId) return;
+      if (sfWorker || sfReady) return;
+      if (!window.Worker) return;
+      try {
+        bindAndStartWorker(new Worker('./stockfish.worker.js'), '[SF] Fallback worker started (stockfish.worker.js)', 'worker-workerjs');
+      } catch (_) {
+        try {
+          bindAndStartWorker(new Worker('./stockfish.js'), '[SF] Fallback worker started (stockfish.js)', 'worker-js');
+        } catch (err) {
+          console.error('[SF] Fallback worker startup failed', err);
+        }
+      }
+    };
+
     try {
-      if (typeof STOCKFISH === 'function') {
-        const maybeEngine = STOCKFISH();
+      const sfFactory = getStockfishFactory();
+      if (sfFactory) {
+        const maybeEngine = sfFactory();
         if (maybeEngine && typeof maybeEngine.then === 'function') {
           sfInitInProgress = true;
+          sfInitStartedTs = Date.now();
+          const asyncInitTimer = setTimeout(() => {
+            if (startSessionId !== gameSessionId) return;
+            if (sfWorker || sfReady) return;
+            console.warn('[SF] Async STOCKFISH() startup timed out; trying Worker fallback');
+            sfInitInProgress = false;
+            tryWorkerStartupFallback();
+          }, 8000);
           maybeEngine.then((resolvedWorker) => {
-            bindAndStartWorker(resolvedWorker, '[SF] Engine resolved via async STOCKFISH() factory');
+            clearTimeout(asyncInitTimer);
+            if (startSessionId !== gameSessionId) {
+              try { resolvedWorker && resolvedWorker.terminate && resolvedWorker.terminate(); } catch (_) {}
+              return;
+            }
+            if (sfWorker || sfReady) {
+              try { resolvedWorker && resolvedWorker.terminate && resolvedWorker.terminate(); } catch (_) {}
+              return;
+            }
+            bindAndStartWorker(resolvedWorker, '[SF] Engine resolved via async STOCKFISH() factory', 'factory');
           }).catch((err) => {
+            clearTimeout(asyncInitTimer);
             sfInitInProgress = false;
             console.error('[SF] Async STOCKFISH() init failed', err);
-            forceStockfishFallbackMove('Stockfish async init failed');
+            tryWorkerStartupFallback();
           });
         } else {
-          bindAndStartWorker(maybeEngine, '[SF] Engine created via STOCKFISH() factory');
+          bindAndStartWorker(maybeEngine, '[SF] Engine created via STOCKFISH() factory', 'factory');
         }
       } else if (window.Worker) {
         try {
-          bindAndStartWorker(new Worker('./stockfish.worker.js'), '[SF] Worker started (stockfish.worker.js)');
+          bindAndStartWorker(new Worker('./stockfish.worker.js'), '[SF] Worker started (stockfish.worker.js)', 'worker-workerjs');
         } catch (_) {
-          bindAndStartWorker(new Worker('./stockfish.js'), '[SF] Worker started (stockfish.js)');
+          bindAndStartWorker(new Worker('./stockfish.js'), '[SF] Worker started (stockfish.js)', 'worker-js');
         }
       } else {
         throw new Error('Web Workers not supported');
@@ -2024,6 +2179,7 @@ function startGame() {
       fetch('./stockfish.wasm', { method: 'HEAD' }).then(r => {
         if (!r.ok) console.warn('stockfish.wasm HEAD status:', r.status);
       }).catch(err => console.warn('stockfish.wasm not reachable:', err));
+    }
     }
   }
 
@@ -2544,9 +2700,21 @@ function maybeAIMove() {
 function aiMoveStockfish() {
   console.log('[AI] aiMoveStockfish ENTRY');
   if (!gameActive) return;
+  if (sfDisabled) {
+    console.warn('Stockfish disabled for this game; using Local AI');
+    aiMoveLocalGreedy();
+    return;
+  }
   if (sfInitInProgress && !sfReady) {
     sfWantGo = true;
     sfLastGoFen = game.fen();
+    if (sfWorker) {
+      try { sfWorker.postMessage('isready'); } catch (_) {}
+    }
+    if (sfInitStartedTs && (Date.now() - sfInitStartedTs > 15000)) {
+      sfInitInProgress = false;
+      forceStockfishFallbackMove('Stockfish startup stalled');
+    }
     console.log('[AI] Stockfish still initializing; waiting for readyok');
     return;
   }
@@ -2563,6 +2731,7 @@ function aiMoveStockfish() {
     sendStockfishGo(sfWorker, fen);
   } else {
     sfInitInProgress = true;
+    if (!sfInitStartedTs) sfInitStartedTs = Date.now();
     sfWantGo = true;
     sfLastGoFen = fen;
     send('uci');
