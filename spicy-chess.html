@@ -1304,6 +1304,24 @@ function canRunThreadedStockfish() {
   return typeof SharedArrayBuffer !== 'undefined';
 }
 
+function instantiateStockfishFromFactory(sfFactory) {
+  if (typeof sfFactory !== 'function') return null;
+  const opts = {
+    locateFile: (path) => {
+      const name = String(path || '').toLowerCase();
+      if (name.endsWith('.wasm')) return './stockfish.wasm';
+      if (name.endsWith('stockfish.worker.js')) return './stockfish.worker.js';
+      return path;
+    }
+  };
+  try {
+    const out = sfFactory(opts);
+    if (out != null) return out;
+  } catch (_) {}
+  // Fallback for factories that do not accept options.
+  return sfFactory();
+}
+
 function adaptEngineToWorkerLike(engine) {
   if (!engine) return null;
   if (typeof engine.postMessage === 'function' && (typeof engine.onmessage !== 'undefined' || typeof engine.addEventListener === 'function')) {
@@ -1343,7 +1361,7 @@ async function createStockfishWorkerForAnalysis() {
   try {
     const sfFactory = getStockfishFactory();
     if (sfFactory) {
-      const maybe = sfFactory();
+      const maybe = instantiateStockfishFromFactory(sfFactory);
       if (maybe && typeof maybe.then === 'function') {
         return adaptEngineToWorkerLike(await maybe);
       }
@@ -2073,7 +2091,7 @@ function startGame() {
       const sfFactory = getStockfishFactory();
       if (sfFactory && failedSource !== 'factory') {
         try {
-          const maybe = sfFactory();
+          const maybe = instantiateStockfishFromFactory(sfFactory);
           if (maybe && typeof maybe.then === 'function') {
             maybe.then((w) => {
               if (!w || startSessionId !== gameSessionId || sfReady) return;
@@ -2168,7 +2186,7 @@ function startGame() {
       if (sfFactory) {
         let maybeEngine = null;
         try {
-          maybeEngine = sfFactory();
+          maybeEngine = instantiateStockfishFromFactory(sfFactory);
         } catch (factoryErr) {
           if (!canRunThreadedStockfish()) {
             throw new Error('Installed Stockfish build requires SharedArrayBuffer. Use a non-threaded stockfish.js build for GitHub Pages.');
