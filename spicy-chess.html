@@ -1288,6 +1288,14 @@ function getStockfishFactory() {
   if (typeof window !== 'undefined') {
     if (typeof window.STOCKFISH === 'function') return window.STOCKFISH;
     if (typeof window.Stockfish === 'function') return window.Stockfish;
+    // Some builds (e.g., nmrugg stockfish.js) attach factory on script._exports.
+    try {
+      const scripts = Array.from(document.getElementsByTagName('script'));
+      for (const s of scripts) {
+        const src = String(s.src || '');
+        if (src.includes('stockfish.js') && typeof s._exports === 'function') return s._exports;
+      }
+    } catch (_) {}
   }
   return null;
 }
