@@ -1979,6 +1979,17 @@ function startGame() {
         if (!lines.length) return;
         for (const line of lines) {
           console.debug('[SF line]', line);
+          if (/^stockfish\b/i.test(line)) {
+            // Some builds emit only a banner line and do not reliably echo uciok/readyok.
+            sfReady = true;
+            sfInitInProgress = false;
+            sfInitStartedTs = 0;
+            if (sfWantGo && game) {
+              sfWantGo = false;
+              sendStockfishGo(worker, game.fen());
+            }
+            continue;
+          }
           if (line.includes('uciok')) {
             configureStockfishForLevel(worker);
             // Some wrappers never emit readyok; treat uciok as ready enough to search.
@@ -2795,7 +2806,16 @@ function aiMoveStockfish() {
   }
   if (!sfWorker) {
     console.warn('Stockfish worker not initialized');
-    forceStockfishFallbackMove('Stockfish worker unavailable');
+    sfDisabled = true;
+    if (opponentType === 'stockfish') {
+      opponentType = 'local';
+      const oppSel = document.getElementById('opponentSelect');
+      if (oppSel) oppSel.value = 'local';
+      updateOpponentHint();
+      updateTurnInfo();
+    }
+    log('Stockfish unavailable; switched to Local AI for this game.');
+    aiMoveLocalGreedy();
     return;
   }
   const fen = game.fen();
