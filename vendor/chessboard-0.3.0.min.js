@@ -1,0 +1,1 @@
+Package version not found: chessboardjs@0.3.0
