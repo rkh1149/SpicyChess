@@ -1333,7 +1333,12 @@ function adaptEngineToWorkerLike(engine) {
       onerror: null,
       onmessageerror: null,
       postMessage: (msg) => {
-        try { engine.postMessage(String(msg)); } catch (err) {
+        const text = String(msg);
+        try {
+          // nmrugg/stockfish.js single-thread build expects onCustomMessage.
+          if (typeof engine.onCustomMessage === 'function') engine.onCustomMessage(text);
+          else engine.postMessage(text);
+        } catch (err) {
           if (wrapped.onerror) wrapped.onerror(err);
         }
       },
