@@ -512,11 +512,21 @@ let boardTouchInputBound = null;
 const squareHandlerBindings = new Map();
 let helpPreviewMove = { from: null, to: null };
 let helpPreviewTimer = null;
-const prefersTapInput = (typeof window !== 'undefined') && (
-  (!!window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches) ||
-  ('ontouchstart' in window) ||
-  ((navigator && Number(navigator.maxTouchPoints)) > 0)
-);
+const inputCapabilities = (() => {
+  if (typeof window === 'undefined') {
+    return { hasCoarse: false, hasFine: false, hasTouch: false };
+  }
+
+  const hasCoarse = !!window.matchMedia && window.matchMedia('(any-pointer: coarse)').matches;
+  const hasFine = !!window.matchMedia && window.matchMedia('(any-pointer: fine)').matches;
+  const hasTouch = ('ontouchstart' in window) || ((typeof navigator !== 'undefined' && Number(navigator.maxTouchPoints) > 0));
+
+  return { hasCoarse, hasFine, hasTouch };
+})();
+
+const prefersTapInput =
+  (inputCapabilities.hasCoarse && !inputCapabilities.hasFine) ||
+  (inputCapabilities.hasTouch && !inputCapabilities.hasFine && !inputCapabilities.hasCoarse);
 
 const openingBookLines = [
   ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5'],
@@ -2421,7 +2431,9 @@ function startGame() {
   resolveRealisticPieces((pieceSet) => {
     const useInline = !pieceSet;
     boardConfig = {
-      draggable: !prefersTapInput,
+      // Keep drag enabled even on touch-capable devices so hybrid devices
+      // (e.g., Surface with touchscreen + mouse/trackpad) can use both inputs.
+      draggable: true,
       position: 'start',
       onDragStart: onDragStart,
       onMouseoverSquare: onMouseoverSquare,
