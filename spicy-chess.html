@@ -237,10 +237,10 @@
     .board-b72b1:hover .piece-417db { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.18)); }
 
     #demoOverlay {
-      position: absolute;
-      top: 10px;
-      left: 42px;
-      width: min(360px, calc(var(--board-size) - 20px));
+      position: fixed;
+      top: 84px;
+      left: 16px;
+      width: min(360px, calc(100vw - 24px));
       z-index: 12;
       display: none;
       pointer-events: none;
@@ -1828,13 +1828,10 @@ function setupDemoOverlayDrag() {
   window.addEventListener('pointercancel', stopDrag);
   window.addEventListener('pointermove', (e) => {
     if (!demoDragState.active) return;
-    const frame = overlay.closest('.board-frame');
-    if (!frame) return;
-    const frameRect = frame.getBoundingClientRect();
-    let left = e.clientX - frameRect.left - demoDragState.dx;
-    let top = e.clientY - frameRect.top - demoDragState.dy;
-    const maxLeft = Math.max(0, frame.clientWidth - overlay.offsetWidth - 8);
-    const maxTop = Math.max(0, frame.clientHeight - overlay.offsetHeight - 8);
+    let left = e.clientX - demoDragState.dx;
+    let top = e.clientY - demoDragState.dy;
+    const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth - 8);
+    const maxTop = Math.max(0, window.innerHeight - overlay.offsetHeight - 8);
     left = Math.max(0, Math.min(left, maxLeft));
     top = Math.max(0, Math.min(top, maxTop));
     overlay.style.left = `${left}px`;
@@ -1891,6 +1888,14 @@ function postMoveChecksAndFlow(lastMoverColor) {
   updateTurnInfo();
   refreshSpecialButtons();
 
+  // Demo should not trigger game-end overlays or post-game analysis.
+  if (isDemoRunning) {
+    if (game && game.in_check && game.in_check()) {
+      log(`${game.turn() === 'w' ? 'White' : 'Black'} is in check.`);
+    }
+    return;
+  }
+
   if (game.in_checkmate()) {
     handleGameEnd('checkmate', lastMoverColor);
     return;
@@ -1918,8 +1923,6 @@ function postMoveChecksAndFlow(lastMoverColor) {
   if (game.in_check()) {
     log(`${game.turn() === 'w' ? 'White' : 'Black'} is in check.`);
   }
-
-  if (isDemoRunning) return;
 
   const myColor = getUserColorCode();
   if (!game.game_over() && game.turn() !== myColor) {
