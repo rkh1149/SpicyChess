@@ -1554,7 +1554,11 @@ function accuracyToGameRating(acc) {
 }
 
 async function analyzeGameRatingsWithStockfish(fens) {
-  if (!Array.isArray(fens) || fens.length < 2) return null;
+  window.__analysisLastFallbackReason = '';
+  if (!Array.isArray(fens) || fens.length < 2) {
+    window.__analysisLastFallbackReason = 'invalid-fens';
+    return null;
+  }
   if (!window.__analysisInternal) window.__analysisInternal = [];
   const atrace = (...a) => {
     try { window.__analysisInternal.push([new Date().toISOString(), ...a]); } catch (_) {}
@@ -1562,6 +1566,7 @@ async function analyzeGameRatingsWithStockfish(fens) {
   const analyzer = await createStockfishAnalyzer();
   if (!analyzer) {
     atrace('no-analyzer');
+    window.__analysisLastFallbackReason = 'no-analyzer';
     return null;
   }
   const mainThreadLike = !!analyzer.isMainThreadLike;
@@ -1610,8 +1615,14 @@ async function analyzeGameRatingsWithStockfish(fens) {
       }
     }, 300);
     for (let i = 1; i < fens.length; i += stride) {
-      if (abortedForStall) return null;
-      if ((Date.now() - startTs) > timeBudgetMs) return null;
+      if (abortedForStall) {
+        window.__analysisLastFallbackReason = 'stall-watchdog';
+        return null;
+      }
+      if ((Date.now() - startTs) > timeBudgetMs) {
+        window.__analysisLastFallbackReason = 'time-budget';
+        return null;
+      }
       sampledDone += 1;
       if (sampledDone === 1 || sampledDone % 4 === 0 || sampledDone === sampledTotal) {
         updateEloBoardPanel(`Analyzing game with Stockfish... ${sampledDone}/${sampledTotal}`);
@@ -1635,7 +1646,10 @@ async function analyzeGameRatingsWithStockfish(fens) {
     analyzer.close();
   }
   atrace('complete', stats);
-  if (stats.w.moves + stats.b.moves < 8) return null;
+  if (stats.w.moves + stats.b.moves < 8) {
+    window.__analysisLastFallbackReason = 'insufficient-samples';
+    return null;
+  }
   const build = (color) => {
     const moves = stats[color].moves || 0;
     const avgCpl = moves > 0 ? (stats[color].cpl / moves) : 120;
@@ -1658,16 +1672,25 @@ async function finalizeGameRatings(reasonText, scoreWhite, sessionIdAtEnd) {
   const fens = moveHistory.slice();
   updateEloBoardPanel(`${reasonText}. Analyzing game with Stockfish...`);
   showEndgameOverlay('Game Finished', `${reasonText}. Running post-game analysis...`);
+  let analyzeTimedOut = false;
   const analyzed = await Promise.race([
     analyzeGameRatingsWithStockfish(fens),
-    new Promise((resolve) => setTimeout(() => resolve(null), 12000))
+    new Promise((resolve) => setTimeout(() => {
+      analyzeTimedOut = true;
+      resolve(null);
+    }, 12000))
   ]);
   if (sessionIdAtEnd !== gameSessionId) return;
 
   if (analyzed) gameRatings = analyzed;
   else gameRatings = buildFallbackGameRatings(scoreWhite);
 
-  const sourceText = analyzed ? 'Stockfish analysis complete.' : 'Stockfish unavailable; using fallback estimate.';
+  let fallbackReason = '';
+  try { fallbackReason = String(window.__analysisLastFallbackReason || '').trim(); } catch (_) {}
+  if (analyzeTimedOut) fallbackReason = 'finalize-timeout';
+  const sourceText = analyzed
+    ? 'Stockfish analysis complete.'
+    : `Stockfish unavailable; using fallback estimate${fallbackReason ? ` (${fallbackReason})` : ''}.`;
   const summary = `${reasonText}. ${formatSideGameRatingLine('w')}. ${formatSideGameRatingLine('b')}. ${sourceText}`;
   updateEloBoardPanel(summary);
   showEndgameOverlay('Game Finished', summary);
