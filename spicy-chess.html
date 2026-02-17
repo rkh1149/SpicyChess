@@ -1304,6 +1304,10 @@ function canRunThreadedStockfish() {
   return typeof SharedArrayBuffer !== 'undefined';
 }
 
+function canUseWebWorkers() {
+  return typeof Worker !== 'undefined';
+}
+
 function instantiateStockfishFromFactory(sfFactory) {
   if (typeof sfFactory !== 'function') return null;
   const opts = {
@@ -1329,6 +1333,7 @@ function adaptEngineToWorkerLike(engine) {
   }
   if (typeof engine.postMessage === 'function' && typeof engine.addMessageListener === 'function') {
     const wrapped = {
+      __sfMainThread: true,
       onmessage: null,
       onerror: null,
       onmessageerror: null,
@@ -1337,6 +1342,8 @@ function adaptEngineToWorkerLike(engine) {
         try {
           // nmrugg/stockfish.js single-thread build expects onCustomMessage.
           if (typeof engine.onCustomMessage === 'function') engine.onCustomMessage(text);
+          else if (engine.queue && typeof engine.queue.put === 'function') engine.queue.put(text);
+          else if (typeof engine._origOnCustomMessage === 'function') engine._origOnCustomMessage(text);
           else engine.postMessage(text);
         } catch (err) {
           if (wrapped.onerror) wrapped.onerror(err);
@@ -1363,6 +1370,7 @@ function adaptEngineToWorkerLike(engine) {
 }
 
 async function createStockfishWorkerForAnalysis() {
+  // Prefer factory first for compatibility with single-thread builds.
   try {
     const sfFactory = getStockfishFactory();
     if (sfFactory) {
@@ -1372,11 +1380,30 @@ async function createStockfishWorkerForAnalysis() {
       }
       return adaptEngineToWorkerLike(maybe);
     }
-  } catch (_) {}
-  if (!canRunThreadedStockfish()) return null;
-  if (window.Worker) {
-    try { return adaptEngineToWorkerLike(new Worker('./stockfish.worker.js')); } catch (_) {}
-    try { return adaptEngineToWorkerLike(new Worker('./stockfish.js')); } catch (_) {}
+  } catch (err) {
+    try {
+      window.__analysisInternal = window.__analysisInternal || [];
+      window.__analysisInternal.push([new Date().toISOString(), 'analysis-factory-failed', String(err)]);
+    } catch (_) {}
+  }
+
+  // Then try worker-backed analysis.
+  if (canUseWebWorkers()) {
+    const workerCandidates = [
+      './stockfish.js#./stockfish-nnue-16-single.wasm,worker',
+      './stockfish.js',
+      './stockfish.worker.js'
+    ];
+    for (const src of workerCandidates) {
+      try {
+        return adaptEngineToWorkerLike(new Worker(src));
+      } catch (err) {
+        try {
+          window.__analysisInternal = window.__analysisInternal || [];
+          window.__analysisInternal.push([new Date().toISOString(), 'analysis-worker-candidate-failed', src, String(err)]);
+        } catch (_) {}
+      }
+    }
   }
   return null;
 }
@@ -1386,12 +1413,21 @@ function createStockfishAnalyzer() {
     if (!worker) return null;
   return new Promise((resolveOuter) => {
     let currentEval = null;
+    let evalSeq = 0;
     let settled = false;
     let uciTimer = null;
     let readyTimer = null;
 
     const send = (msg) => {
       try { worker.postMessage(String(msg)); } catch (_) {}
+    };
+    const cancelCurrentEval = () => {
+      if (!currentEval) return;
+      const cb = currentEval.resolve;
+      const out = currentEval.score || 0;
+      currentEval = null;
+      try { cb(out); } catch (_) {}
+      try { send('stop'); } catch (_) {}
     };
     const fail = () => {
       if (settled) return;
@@ -1405,22 +1441,26 @@ function createStockfishAnalyzer() {
       resolveOuter(api);
     };
 
-    const evaluateFen = (fen, movetimeMs = 130, depth = 10) => {
+    const evaluateFen = (fen, movetimeMs = 110, depth = null) => {
       if (!fen) return Promise.resolve(0);
       if (currentEval) {
-        try { send('stop'); } catch (_) {}
+        // Resolve prior in-flight eval before starting a new one.
+        cancelCurrentEval();
       }
       return new Promise((resolveEval) => {
-        currentEval = { resolve: resolveEval, score: 0 };
+        const evalId = ++evalSeq;
+        currentEval = { id: evalId, resolve: resolveEval, score: 0 };
         send(`position fen ${fen}`);
-        send(`go movetime ${Math.max(80, movetimeMs | 0)} depth ${Math.max(6, depth | 0)}`);
+        const safeMs = Math.max(60, movetimeMs | 0);
+        if (Number.isFinite(depth)) send(`go movetime ${safeMs} depth ${Math.max(4, depth | 0)}`);
+        else send(`go movetime ${safeMs}`);
         setTimeout(() => {
-          if (!currentEval) return;
+          if (!currentEval || currentEval.id !== evalId) return;
           const out = currentEval.score || 0;
           currentEval = null;
           resolveEval(out);
           try { send('stop'); } catch (_) {}
-        }, Math.max(220, movetimeMs + 420));
+        }, Math.max(260, safeMs + 420));
       });
     };
 
@@ -1428,6 +1468,17 @@ function createStockfishAnalyzer() {
       const lines = normalizeUciLines(e);
       if (!lines.length) return;
       for (const line of lines) {
+        if (/^stockfish\b/i.test(line)) {
+          if (uciTimer) clearTimeout(uciTimer);
+          if (readyTimer) clearTimeout(readyTimer);
+          finish({
+            evaluateFen,
+            cancelCurrentEval,
+            isMainThreadLike: !!worker.__sfMainThread,
+            close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
+          });
+          continue;
+        }
         if (line.includes('uciok')) {
           if (uciTimer) clearTimeout(uciTimer);
           send('setoption name MultiPV value 1');
@@ -1436,6 +1487,8 @@ function createStockfishAnalyzer() {
           readyTimer = setTimeout(() => {
             finish({
               evaluateFen,
+              cancelCurrentEval,
+              isMainThreadLike: !!worker.__sfMainThread,
               close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
             });
           }, 1200);
@@ -1446,6 +1499,8 @@ function createStockfishAnalyzer() {
           if (readyTimer) clearTimeout(readyTimer);
           finish({
             evaluateFen,
+            cancelCurrentEval,
+            isMainThreadLike: !!worker.__sfMainThread,
             close: () => { try { worker.terminate && worker.terminate(); } catch (_) {} }
           });
           continue;
@@ -1456,6 +1511,7 @@ function createStockfishAnalyzer() {
           continue;
         }
         if (currentEval && line.startsWith('bestmove')) {
+          if (!currentEval) continue;
           const out = currentEval.score || 0;
           const cb = currentEval.resolve;
           currentEval = null;
@@ -1499,27 +1555,87 @@ function accuracyToGameRating(acc) {
 
 async function analyzeGameRatingsWithStockfish(fens) {
   if (!Array.isArray(fens) || fens.length < 2) return null;
+  if (!window.__analysisInternal) window.__analysisInternal = [];
+  const atrace = (...a) => {
+    try { window.__analysisInternal.push([new Date().toISOString(), ...a]); } catch (_) {}
+  };
   const analyzer = await createStockfishAnalyzer();
-  if (!analyzer) return null;
+  if (!analyzer) {
+    atrace('no-analyzer');
+    return null;
+  }
+  const mainThreadLike = !!analyzer.isMainThreadLike;
+  const totalPlies = Math.max(0, fens.length - 1);
+  const maxPlies = mainThreadLike ? 16 : 28;
+  const stride = Math.max(1, Math.ceil(totalPlies / Math.max(1, maxPlies)));
+  const thinkBeforeMs = mainThreadLike ? 24 : 70;
+  const thinkAfterMs = mainThreadLike ? 18 : 55;
+  const depthBefore = null;
+  const depthAfter = null;
+  const timeBudgetMs = mainThreadLike ? 2400 : 12000;
+  const startTs = Date.now();
+  const sampledTotal = Math.max(1, Math.ceil(totalPlies / stride));
+  let sampledDone = 0;
+  let lastProgressTs = Date.now();
+  let abortedForStall = false;
+  let stallWatch = null;
+  const evalWithDeadline = async (fen, ms, depth, deadlineMs = 1800) => {
+    lastProgressTs = Date.now();
+    let timedOut = false;
+    const val = await Promise.race([
+      analyzer.evaluateFen(fen, ms, depth),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          timedOut = true;
+          resolve(0);
+        }, Math.max(700, deadlineMs));
+      })
+    ]);
+    if (timedOut && analyzer.cancelCurrentEval) analyzer.cancelCurrentEval();
+    lastProgressTs = Date.now();
+    return Number.isFinite(val) ? val : 0;
+  };
   const stats = {
     w: { cpl: 0, moves: 0 },
     b: { cpl: 0, moves: 0 }
   };
   try {
-    for (let i = 1; i < fens.length; i++) {
+    atrace('start', { totalPlies, stride, sampledTotal, mainThreadLike });
+    stallWatch = setInterval(() => {
+      if ((Date.now() - lastProgressTs) > 3200) {
+        abortedForStall = true;
+        lastProgressTs = Date.now();
+        try { analyzer.cancelCurrentEval && analyzer.cancelCurrentEval(); } catch (_) {}
+        atrace('stall-watchdog-fired');
+      }
+    }, 300);
+    for (let i = 1; i < fens.length; i += stride) {
+      if (abortedForStall) return null;
+      if ((Date.now() - startTs) > timeBudgetMs) return null;
+      sampledDone += 1;
+      if (sampledDone === 1 || sampledDone % 4 === 0 || sampledDone === sampledTotal) {
+        updateEloBoardPanel(`Analyzing game with Stockfish... ${sampledDone}/${sampledTotal}`);
+      }
+      // Yield so paint/input can run while long analysis continues.
+      await new Promise(resolve => setTimeout(resolve, 0));
       const beforeFen = fens[i - 1];
       const afterFen = fens[i];
       const mover = turnFromFen(beforeFen);
-      const bestBefore = await analyzer.evaluateFen(beforeFen, 125, 10);
-      const afterRaw = await analyzer.evaluateFen(afterFen, 105, 9);
+      atrace('ply-start', i, mover);
+      const bestBefore = await evalWithDeadline(beforeFen, thinkBeforeMs, depthBefore, 1800);
+      const afterRaw = await evalWithDeadline(afterFen, thinkAfterMs, depthAfter, 1800);
       const afterFromMover = -afterRaw;
       const cpl = clampNumber(Math.max(0, bestBefore - afterFromMover), 0, 600);
       stats[mover].cpl += cpl;
-      stats[mover].moves += 1;
+      stats[mover].moves += stride;
+      atrace('ply-end', i, cpl);
     }
   } finally {
+    if (stallWatch) clearInterval(stallWatch);
     analyzer.close();
   }
+  atrace('complete', stats);
+  if (stats.w.moves + stats.b.moves < 8) return null;
   const build = (color) => {
     const moves = stats[color].moves || 0;
     const avgCpl = moves > 0 ? (stats[color].cpl / moves) : 120;
@@ -1542,7 +1658,10 @@ async function finalizeGameRatings(reasonText, scoreWhite, sessionIdAtEnd) {
   const fens = moveHistory.slice();
   updateEloBoardPanel(`${reasonText}. Analyzing game with Stockfish...`);
   showEndgameOverlay('Game Finished', `${reasonText}. Running post-game analysis...`);
-  const analyzed = await analyzeGameRatingsWithStockfish(fens);
+  const analyzed = await Promise.race([
+    analyzeGameRatingsWithStockfish(fens),
+    new Promise((resolve) => setTimeout(() => resolve(null), 12000))
+  ]);
   if (sessionIdAtEnd !== gameSessionId) return;
 
   if (analyzed) gameRatings = analyzed;
