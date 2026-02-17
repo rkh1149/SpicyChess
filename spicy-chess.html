@@ -512,6 +512,7 @@ let boardTouchInputBound = null;
 const squareHandlerBindings = new Map();
 let helpPreviewMove = { from: null, to: null };
 let helpPreviewTimer = null;
+let demoDialogArmedAt = 0;
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -786,6 +787,7 @@ if (askHelpBtn) {
 }
 if (demoYesBtn) {
   demoYesBtn.addEventListener('click', () => {
+    if (Date.now() < demoDialogArmedAt) return;
     if (demoDecisionResolver) {
       const cb = demoDecisionResolver;
       demoDecisionResolver = null;
@@ -795,6 +797,7 @@ if (demoYesBtn) {
 }
 if (demoNoBtn) {
   demoNoBtn.addEventListener('click', () => {
+    if (Date.now() < demoDialogArmedAt) return;
     if (demoDecisionResolver) {
       const cb = demoDecisionResolver;
       demoDecisionResolver = null;
@@ -1791,6 +1794,8 @@ function askDemoStepOnBoard(cfg) {
   question.textContent = cfg.question || 'Show this move?';
   yesBtn.textContent = cfg.yesLabel || 'Yes';
   noBtn.textContent = cfg.noLabel || 'No';
+  // Prevent accidental carry-over click/tap from previous dialog.
+  demoDialogArmedAt = Date.now() + 180;
   setDemoOverlayVisible(true);
 
   return new Promise(resolve => {
@@ -3507,7 +3512,7 @@ async function runSpecialMovesDemo() {
         question: (i < steps.length - 1)
           ? 'Continue to the next special move?'
           : 'All moves shown. Close demo?',
-        yesLabel: (i < steps.length - 1) ? 'Next Move' : 'Close',
+        yesLabel: (i < steps.length - 1) ? 'Next Before Position' : 'Close',
         noLabel: 'Stop Demo'
       });
       if (!pauseBeforeNext) {
