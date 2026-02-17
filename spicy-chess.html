@@ -3482,12 +3482,12 @@ async function runSpecialMovesDemo() {
         if (setupOk === false) throw new Error(`${s.title} setup failed.`);
       }
       const proceed = await askDemoStepOnBoard({
-        title: s.title,
-        body: s.body,
+        title: `${s.title} — Before`,
+        body: `${s.body} The board currently shows the position before the special move.`,
         moveText: s.moveText,
-        question: `Show this move now? (${i + 1}/${steps.length})`,
-        yesLabel: 'Yes',
-        noLabel: 'No'
+        question: `Show the after-move result now? (${i + 1}/${steps.length})`,
+        yesLabel: 'Show After Move',
+        noLabel: 'Stop Demo'
       });
       if (!proceed) {
         log('Demo stopped by user.');
