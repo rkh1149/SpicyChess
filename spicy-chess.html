@@ -96,6 +96,7 @@
       position: relative;
     }
     .board-actions { margin-top: 8px; text-align: center; }
+    .board-action-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
     #touchHint {
       margin-top: 8px;
       font-size: 0.78rem;
@@ -335,6 +336,10 @@
         </div>
       </div>
       <div class="board-actions">
+        <div class="board-action-row">
+          <button id="startBtn" class="primary-btn">Start Game</button>
+          <button id="resignBtn" title="Resign the current game">Resign</button>
+        </div>
         <button id="askHelpBtn" style="display:none;" title="Ask for your best next move">Ask Best Move</button>
         <div id="touchHint">Touch controls: tap a piece, then tap its destination square.</div>
         <div id="eloBoardPanel">
@@ -398,7 +403,6 @@
           </div>
         </div>
         <div class="action-row">
-          <button id="startBtn" class="primary-btn">Start Game</button>
           <button id="resetBtn">Reset</button>
           <button id="undoBtn" title="Undo the last full move">Undo Full Move</button>
           <button id="rematchBtn" title="Start a new game with colors swapped">Rematch (Swap Sides)</button>
@@ -753,6 +757,13 @@ function updateHelpButtonState() {
   btn.disabled = !canAsk;
 }
 
+function updateResignButtonState() {
+  const btn = document.getElementById('resignBtn');
+  if (!btn) return;
+  const canResign = !!(game && gameActive && !gameResultHandled && !isDemoRunning);
+  btn.disabled = !canResign;
+}
+
 function updateHelpInfo() {
   const el = document.getElementById('helpInfo');
   if (!el) return;
@@ -821,6 +832,35 @@ async function onAskHelpClick() {
   }
 }
 
+function onResignClick() {
+  if (!game || !gameActive || gameResultHandled || isDemoRunning) return;
+  const resigningColor = getUserColorCode();
+  const winnerColor = resigningColor === 'w' ? 'b' : 'w';
+  const winnerName = winnerColor === 'w' ? 'White' : 'Black';
+  const reason = `${winnerName} wins by resignation`;
+  const scoreWhite = winnerColor === 'w' ? 1 : 0;
+
+  gameStatusOverride = {
+    text: `State: ${reason}`,
+    kind: 'state-win'
+  };
+  stopClockTicker();
+  gameActive = false;
+  gameResultHandled = true;
+  updateResignButtonState();
+  log(reason + '.');
+  const sessionAtEnd = gameSessionId;
+  finalizeGameRatings(reason, scoreWhite, sessionAtEnd).catch((err) => {
+    console.error('Game rating analysis failed:', err);
+    if (sessionAtEnd !== gameSessionId) return;
+    gameRatings = buildFallbackGameRatings(scoreWhite);
+    const summary = `${reason}. ${formatSideGameRatingLine('w')}. ${formatSideGameRatingLine('b')}.`;
+    updateEloBoardPanel(summary);
+    showEndgameOverlay('Game Finished', summary);
+  });
+  updateTurnInfo();
+}
+
 function updateOpponentHint() {
   const hint = document.getElementById('opponentHint');
   if (!hint) { updateStatusBar(); return; }
@@ -850,6 +890,7 @@ const sideSel = document.getElementById('sideSelect');
 const modeSel = document.getElementById('modeSelect');
 const tcSel = document.getElementById('timeControlSelect');
 const askHelpBtn = document.getElementById('askHelpBtn');
+const resignBtn = document.getElementById('resignBtn');
 const demoYesBtn = document.getElementById('demoYesBtn');
 const demoNoBtn = document.getElementById('demoNoBtn');
 if (oppSel) {
@@ -894,6 +935,9 @@ if (tcSel) {
 }
 if (askHelpBtn) {
   askHelpBtn.addEventListener('click', onAskHelpClick);
+}
+if (resignBtn) {
+  resignBtn.addEventListener('click', onResignClick);
 }
 if (demoYesBtn) {
   demoYesBtn.addEventListener('click', () => {
@@ -961,6 +1005,7 @@ function onTimeExpired(colorFlagged) {
   stopClockTicker();
   gameActive = false;
   gameResultHandled = true;
+  updateResignButtonState();
   log(reason + '.');
   const scoreWhite = (winnerColor === 'w') ? 1 : 0;
   finalizeGameRatings(reason, scoreWhite, gameSessionId).catch((err) => {
@@ -1974,6 +2019,7 @@ function updateTurnInfo() {
   refreshCaptureAndMaterialUI();
   applyBoardHighlights();
   updateHelpInfo();
+  updateResignButtonState();
 }
 
 function getUserColorCode() {
@@ -3423,7 +3469,7 @@ function aiMoveLocalGreedy() {
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function setControlsDisabled(disabled) {
-  ['startBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','sideSelect','opponentSelect','levelSelect','helpSelect','timeControlSelect','askHelpBtn'].forEach(id => {
+  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','sideSelect','opponentSelect','levelSelect','helpSelect','timeControlSelect','askHelpBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !!disabled;
   });
