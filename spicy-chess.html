@@ -163,6 +163,28 @@
       gap: 10px;
     }
     .control-item label { display: block; font-weight: 700; font-size: 0.84rem; margin-bottom: 4px; color: #2c3850; }
+    #assetCheckResult {
+      min-height: 22px;
+      padding: 6px 8px;
+      border: 1px solid #d7e4f5;
+      border-radius: 8px;
+      background: #f8fbff;
+      color: #3f4f67;
+      font-size: 0.82rem;
+      line-height: 1.25;
+      word-break: break-word;
+    }
+    #assetCheckResult.asset-ok {
+      border-color: #a9d8b2;
+      background: #effcf3;
+      color: #1e6a35;
+      font-weight: 700;
+    }
+    #assetCheckResult.asset-missing {
+      border-color: #efc0b7;
+      background: #fff5f2;
+      color: #8f2d1d;
+    }
     .action-row { margin-top: 10px; }
 
     #capturePanel { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
@@ -400,6 +422,10 @@
               <option value="rapid" selected>Rapid (10+0)</option>
               <option value="classical">Classical (Unlimited)</option>
             </select>
+          </div>
+          <div class="control-item">
+            <label for="assetCheckResult">Asset Check</label>
+            <div id="assetCheckResult">Checking...</div>
           </div>
         </div>
         <div class="action-row">
@@ -3924,6 +3950,58 @@ function squareToPieceMapFromFen(fen) {
 }
 function idxToSquare(fileIdx, rankIdx) { const file = String.fromCharCode(97 + fileIdx); const rank = String(1 + rankIdx); return file + rank; }
 
+async function checkAssetUrl(url) {
+  try {
+    const r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    if (r && r.ok) return true;
+  } catch (_) {}
+  try {
+    const r2 = await fetch(url, { cache: 'no-store' });
+    return !!(r2 && r2.ok);
+  } catch (_) {}
+  return false;
+}
+
+async function runAssetCheck() {
+  const el = document.getElementById('assetCheckResult');
+  if (!el) return;
+  const required = [
+    './vendor/jquery.min.js',
+    './vendor/chessboard-0.3.0.min.css',
+    './vendor/chessboard-0.3.0.min.js',
+    './vendor/chess.min.js',
+    './stockfish.js',
+    './stockfish.wasm',
+    './stockfish-nnue-16-single.wasm',
+    './vendor/pieces/wp.svg',
+    './vendor/pieces/wr.svg',
+    './vendor/pieces/wn.svg',
+    './vendor/pieces/wb.svg',
+    './vendor/pieces/wq.svg',
+    './vendor/pieces/wk.svg',
+    './vendor/pieces/bp.svg',
+    './vendor/pieces/br.svg',
+    './vendor/pieces/bn.svg',
+    './vendor/pieces/bb.svg',
+    './vendor/pieces/bq.svg',
+    './vendor/pieces/bk.svg'
+  ];
+  el.classList.remove('asset-ok', 'asset-missing');
+  el.textContent = 'Checking...';
+  const missing = [];
+  for (const url of required) {
+    const ok = await checkAssetUrl(url);
+    if (!ok) missing.push(url.replace(/^\.\//, ''));
+  }
+  if (!missing.length) {
+    el.textContent = 'OK';
+    el.classList.add('asset-ok');
+  } else {
+    el.textContent = `Missing: ${missing.join(', ')}`;
+    el.classList.add('asset-missing');
+  }
+}
+
 /* =========================
    Boot
    ========================= */
@@ -3934,6 +4012,7 @@ updateOpponentHint();
 updateTurnInfo();
 updateEloBoardPanel();
 updateHelpInfo();
+runAssetCheck();
 log('Loaded. Choose a mode and click "Start Game".');
 </script>
 </body>
