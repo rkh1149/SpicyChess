@@ -386,10 +386,40 @@
             </select>
           </div>
           <div class="control-item">
+            <label for="gameTypeSelect">Game Type</label>
+            <select id="gameTypeSelect" title="Choose player-vs-AI or AI-vs-AI autoplay">
+              <option value="human_vs_ai" selected>Human vs AI</option>
+              <option value="ai_vs_ai">AI vs AI</option>
+            </select>
+          </div>
+          <div class="control-item">
             <label for="sideSelect">Side</label>
             <select id="sideSelect" title="Choose your side (board perspective)">
               <option value="white">White</option>
               <option value="black">Black</option>
+            </select>
+          </div>
+          <div class="control-item">
+            <label for="aiWhiteEngineSelect">AI White</label>
+            <select id="aiWhiteEngineSelect" title="Engine for White in AI vs AI">
+              <option value="local" selected>Local AI</option>
+              <option value="stockfish">Stockfish</option>
+            </select>
+          </div>
+          <div class="control-item">
+            <label for="aiBlackEngineSelect">AI Black</label>
+            <select id="aiBlackEngineSelect" title="Engine for Black in AI vs AI">
+              <option value="local" selected>Local AI</option>
+              <option value="stockfish">Stockfish</option>
+            </select>
+          </div>
+          <div class="control-item">
+            <label for="aiVsAiSpeedSelect">AI vs AI Speed</label>
+            <select id="aiVsAiSpeedSelect" title="Delay between AI moves">
+              <option value="100">Very Fast</option>
+              <option value="250">Fast</option>
+              <option value="500" selected>Normal</option>
+              <option value="900">Slow</option>
             </select>
           </div>
           <div class="control-item">
@@ -477,6 +507,12 @@
           <div id="moveHistoryList"></div>
           <div id="moveHistoryActions">
             <button id="exportPgnBtn" type="button">Export PGN</button>
+            <button id="replayStartBtn" type="button">Replay Start</button>
+            <button id="replayPrevBtn" type="button">Prev</button>
+            <button id="replayNextBtn" type="button">Next</button>
+            <button id="replayPlayBtn" type="button">Play</button>
+            <button id="replayPauseBtn" type="button">Pause</button>
+            <button id="replayEndBtn" type="button">Replay End</button>
           </div>
         </details>
         <details id="logDetails" open>
@@ -497,6 +533,10 @@ let boardConfig = null;
 let modeConfig = null;
 let modeName = 'mild';
 let userSide = 'white'; // 'white' or 'black' — used for board orientation
+let gameType = 'human_vs_ai';   // human_vs_ai | ai_vs_ai
+let aiVsAiEngines = { w: 'local', b: 'local' };
+let aiVsAiMoveDelayMs = 500;
+let aiVsAiTimer = null;
 
 // Opponents
 let opponentType = 'local';      // 'local' | 'stockfish'
@@ -549,6 +589,9 @@ let searchDeadlineAt = 0;
 let searchAbortFlag = false;
 let searchTT = new Map();
 const SEARCH_TT_MAX = 100000;
+let replayModeActive = false;
+let replayPly = 0;
+let replayTimer = null;
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -779,14 +822,14 @@ function updateHelpButtonState() {
   const on = helpMode === 'on';
   btn.style.display = on ? 'inline-block' : 'none';
   if (!on) { btn.disabled = true; return; }
-  const canAsk = !!(game && !game.game_over() && game.turn() === getUserColorCode() && !isDemoRunning && !hintSearchInProgress);
+  const canAsk = !!(game && !game.game_over() && game.turn() === getUserColorCode() && !isDemoRunning && !hintSearchInProgress && !isAiVsAiActive());
   btn.disabled = !canAsk;
 }
 
 function updateResignButtonState() {
   const btn = document.getElementById('resignBtn');
   if (!btn) return;
-  const canResign = !!(game && gameActive && !gameResultHandled && !isDemoRunning);
+  const canResign = !!(game && gameActive && !gameResultHandled && !isDemoRunning && !isAiVsAiActive());
   btn.disabled = !canResign;
 }
 
@@ -824,6 +867,7 @@ function updateHelpInfo() {
 
 async function onAskHelpClick() {
   if (helpMode !== 'on') return;
+  if (isAiVsAiActive()) return;
   const el = document.getElementById('helpInfo');
   if (!el) return;
   if (hintSearchInProgress) return;
@@ -871,6 +915,7 @@ function onResignClick() {
     kind: 'state-win'
   };
   stopClockTicker();
+  clearAiVsAiTimer();
   gameActive = false;
   gameResultHandled = true;
   updateResignButtonState();
@@ -891,12 +936,50 @@ function updateOpponentHint() {
   const hint = document.getElementById('opponentHint');
   if (!hint) { updateStatusBar(); return; }
   const lvl = getAiLevelConfig().label;
-  if (opponentType === 'stockfish') {
+  if (gameType === 'ai_vs_ai') {
+    hint.textContent = `AI vs AI: White=${aiVsAiEngines.w === 'stockfish' ? 'Stockfish' : 'Local AI'}, Black=${aiVsAiEngines.b === 'stockfish' ? 'Stockfish' : 'Local AI'} • Level: ${lvl}.`;
+  } else if (opponentType === 'stockfish') {
     hint.textContent = `Opponent: Stockfish (single-thread) • Level: ${lvl}.`;
   } else {
     hint.textContent = `Opponent: Local AI • Level: ${lvl}.`;
   }
   updateStatusBar();
+}
+
+function isAiVsAiActive() {
+  return gameType === 'ai_vs_ai';
+}
+
+function aiVsAiNeedsStockfish() {
+  return isAiVsAiActive() && (aiVsAiEngines.w === 'stockfish' || aiVsAiEngines.b === 'stockfish');
+}
+
+function clearAiVsAiTimer() {
+  if (aiVsAiTimer) {
+    clearTimeout(aiVsAiTimer);
+    aiVsAiTimer = null;
+  }
+}
+
+function clearReplayTimer() {
+  if (replayTimer) {
+    clearInterval(replayTimer);
+    replayTimer = null;
+  }
+}
+
+function updateGameTypeUI() {
+  const isA = isAiVsAiActive();
+  const sideWrap = document.getElementById('sideSelect')?.closest('.control-item');
+  const oppWrap = document.getElementById('opponentSelect')?.closest('.control-item');
+  const whiteWrap = document.getElementById('aiWhiteEngineSelect')?.closest('.control-item');
+  const blackWrap = document.getElementById('aiBlackEngineSelect')?.closest('.control-item');
+  const speedWrap = document.getElementById('aiVsAiSpeedSelect')?.closest('.control-item');
+  if (sideWrap) sideWrap.style.display = isA ? 'none' : '';
+  if (oppWrap) oppWrap.style.display = isA ? 'none' : '';
+  if (whiteWrap) whiteWrap.style.display = isA ? '' : 'none';
+  if (blackWrap) blackWrap.style.display = isA ? '' : 'none';
+  if (speedWrap) speedWrap.style.display = isA ? '' : 'none';
 }
 
 /* =========================
@@ -910,6 +993,10 @@ document.getElementById('rematchBtn').addEventListener('click', onRematchSwapSid
 const exportPgnBtn = document.getElementById('exportPgnBtn');
 if (exportPgnBtn) exportPgnBtn.addEventListener('click', exportPgnText);
 const oppSel = document.getElementById('opponentSelect');
+const gameTypeSel = document.getElementById('gameTypeSelect');
+const aiWhiteSel = document.getElementById('aiWhiteEngineSelect');
+const aiBlackSel = document.getElementById('aiBlackEngineSelect');
+const aiVsAiSpeedSel = document.getElementById('aiVsAiSpeedSelect');
 const levelSel = document.getElementById('levelSelect');
 const helpSel = document.getElementById('helpSelect');
 const sideSel = document.getElementById('sideSelect');
@@ -919,10 +1006,43 @@ const askHelpBtn = document.getElementById('askHelpBtn');
 const resignBtn = document.getElementById('resignBtn');
 const demoYesBtn = document.getElementById('demoYesBtn');
 const demoNoBtn = document.getElementById('demoNoBtn');
+const replayStartBtn = document.getElementById('replayStartBtn');
+const replayPrevBtn = document.getElementById('replayPrevBtn');
+const replayNextBtn = document.getElementById('replayNextBtn');
+const replayPlayBtn = document.getElementById('replayPlayBtn');
+const replayPauseBtn = document.getElementById('replayPauseBtn');
+const replayEndBtn = document.getElementById('replayEndBtn');
 if (oppSel) {
   oppSel.addEventListener('change', () => {
     opponentType = oppSel.value;
     updateOpponentHint();
+  });
+}
+if (gameTypeSel) {
+  gameTypeSel.addEventListener('change', () => {
+    gameType = gameTypeSel.value || 'human_vs_ai';
+    updateGameTypeUI();
+    updateOpponentHint();
+    updateTurnInfo();
+  });
+}
+if (aiWhiteSel) {
+  aiWhiteSel.addEventListener('change', () => {
+    aiVsAiEngines.w = aiWhiteSel.value || 'local';
+    updateOpponentHint();
+    updateTurnInfo();
+  });
+}
+if (aiBlackSel) {
+  aiBlackSel.addEventListener('change', () => {
+    aiVsAiEngines.b = aiBlackSel.value || 'local';
+    updateOpponentHint();
+    updateTurnInfo();
+  });
+}
+if (aiVsAiSpeedSel) {
+  aiVsAiSpeedSel.addEventListener('change', () => {
+    aiVsAiMoveDelayMs = parseInt(aiVsAiSpeedSel.value || '500', 10) || 500;
   });
 }
 if (levelSel) {
@@ -965,6 +1085,12 @@ if (askHelpBtn) {
 if (resignBtn) {
   resignBtn.addEventListener('click', onResignClick);
 }
+if (replayStartBtn) replayStartBtn.addEventListener('click', () => replayJumpTo(0));
+if (replayPrevBtn) replayPrevBtn.addEventListener('click', () => replayStep(-1));
+if (replayNextBtn) replayNextBtn.addEventListener('click', () => replayStep(1));
+if (replayPlayBtn) replayPlayBtn.addEventListener('click', startReplayAutoPlay);
+if (replayPauseBtn) replayPauseBtn.addEventListener('click', pauseReplayAutoPlay);
+if (replayEndBtn) replayEndBtn.addEventListener('click', () => replayJumpTo(Math.max(0, moveHistory.length - 1)));
 if (demoYesBtn) {
   demoYesBtn.addEventListener('click', () => {
     if (Date.now() < demoDialogArmedAt) return;
@@ -1029,6 +1155,7 @@ function onTimeExpired(colorFlagged) {
   const reason = `${winnerColor === 'w' ? 'White' : 'Black'} wins on time`;
   gameStatusOverride = { text: `State: ${winnerColor === 'w' ? 'White' : 'Black'} won on time`, kind: 'state-win' };
   stopClockTicker();
+  clearAiVsAiTimer();
   gameActive = false;
   gameResultHandled = true;
   updateResignButtonState();
@@ -1116,6 +1243,8 @@ function appendHistoryEntry(moveText) {
 }
 
 function trimHistoryToPly(ply) {
+  clearReplayTimer();
+  replayModeActive = false;
   moveHistory = moveHistory.slice(0, ply + 1);
   moveSans = moveSans.slice(0, ply);
   specialStateHistory = specialStateHistory.slice(0, ply + 1);
@@ -1128,6 +1257,7 @@ function trimHistoryToPly(ply) {
   hideEndgameOverlay();
   setLastMove(null, null);
   renderMoveHistoryPanel();
+  updateReplayControlsState();
 }
 
 function renderMoveHistoryPanel() {
@@ -1136,6 +1266,7 @@ function renderMoveHistoryPanel() {
   list.innerHTML = '';
   if (!moveSans.length) {
     list.textContent = 'No moves yet.';
+    updateReplayControlsState();
     return;
   }
   for (let i = 0; i < moveSans.length; i += 2) {
@@ -1166,6 +1297,7 @@ function renderMoveHistoryPanel() {
     row.appendChild(bBtn);
     list.appendChild(row);
   }
+  updateReplayControlsState();
 }
 
 function jumpToPly(ply) {
@@ -1179,6 +1311,61 @@ function jumpToPly(ply) {
   refreshSpecialButtons();
   startClockFor(game.turn());
   log(`Jumped to ply ${ply}.`);
+}
+
+function updateReplayControlsState() {
+  const hasData = !!(game && moveHistory.length > 1);
+  const atStart = replayPly <= 0;
+  const atEnd = replayPly >= Math.max(0, moveHistory.length - 1);
+  if (replayStartBtn) replayStartBtn.disabled = !hasData || atStart;
+  if (replayPrevBtn) replayPrevBtn.disabled = !hasData || atStart;
+  if (replayNextBtn) replayNextBtn.disabled = !hasData || atEnd;
+  if (replayEndBtn) replayEndBtn.disabled = !hasData || atEnd;
+  if (replayPlayBtn) replayPlayBtn.disabled = !hasData || atEnd || !!replayTimer;
+  if (replayPauseBtn) replayPauseBtn.disabled = !replayTimer;
+}
+
+function replayJumpTo(targetPly) {
+  if (!game || !board || !moveHistory.length) return;
+  clearReplayTimer();
+  replayModeActive = true;
+  const maxPly = Math.max(0, moveHistory.length - 1);
+  replayPly = Math.max(0, Math.min(maxPly, targetPly | 0));
+  const fen = moveHistory[replayPly];
+  if (!fen || !game.load(fen)) return;
+  board.position(game.fen());
+  setLastMove(null, null);
+  updateTurnInfo();
+  refreshSpecialButtons();
+  stopClockTicker();
+  updateClockUI(null);
+  updateReplayControlsState();
+}
+
+function replayStep(delta) {
+  if (!moveHistory.length) return;
+  if (!replayModeActive) replayPly = Math.max(0, moveHistory.length - 1);
+  replayJumpTo(replayPly + delta);
+}
+
+function pauseReplayAutoPlay() {
+  clearReplayTimer();
+  updateReplayControlsState();
+}
+
+function startReplayAutoPlay() {
+  if (!game || !moveHistory.length) return;
+  if (!replayModeActive) replayJumpTo(0);
+  clearReplayTimer();
+  replayTimer = setInterval(() => {
+    if (replayPly >= Math.max(0, moveHistory.length - 1)) {
+      clearReplayTimer();
+      updateReplayControlsState();
+      return;
+    }
+    replayJumpTo(replayPly + 1);
+  }, Math.max(120, aiVsAiMoveDelayMs));
+  updateReplayControlsState();
 }
 
 function buildFallbackMoveText() {
@@ -1250,8 +1437,15 @@ function updateStatusBar() {
   const state = document.getElementById('stateBadge');
   if (!phase || !side || !engine || !state) return;
 
-  side.textContent = `You: ${userSide === 'black' ? 'Black' : 'White'}`;
-  engine.textContent = `${opponentType === 'stockfish' ? 'Stockfish' : 'Local AI'} • ${getAiLevelConfig().label}`;
+  if (isAiVsAiActive()) side.textContent = 'You: Spectator';
+  else side.textContent = `You: ${userSide === 'black' ? 'Black' : 'White'}`;
+  if (isAiVsAiActive()) {
+    const w = aiVsAiEngines.w === 'stockfish' ? 'SF' : 'Local';
+    const b = aiVsAiEngines.b === 'stockfish' ? 'SF' : 'Local';
+    engine.textContent = `AI vs AI (${w} vs ${b}) • ${getAiLevelConfig().label}`;
+  } else {
+    engine.textContent = `${opponentType === 'stockfish' ? 'Stockfish' : 'Local AI'} • ${getAiLevelConfig().label}`;
+  }
   phase.textContent = `Phase: ${getPhaseLabel()}`;
 
   state.classList.remove('state-check', 'state-win', 'state-draw');
@@ -1923,6 +2117,7 @@ function handleGameEnd(reasonCode, lastMoverColor) {
     kind: statusKind
   };
   stopClockTicker();
+  clearAiVsAiTimer();
   gameActive = false;
   gameResultHandled = true;
   log(reason + '.');
@@ -2031,13 +2226,16 @@ function updateTurnInfo() {
     updateStatusBar();
     refreshCaptureAndMaterialUI();
     updateHelpInfo();
+    updateResignButtonState();
     return;
   }
   const t = game.turn() === 'w' ? 'White' : 'Black';
-  const sideTxt = `You are ${userSide === 'black' ? 'Black' : 'White'}`;
+  const sideTxt = isAiVsAiActive() ? 'Watching AI vs AI' : `You are ${userSide === 'black' ? 'Black' : 'White'}`;
   const levelTxt = `Level: ${getAiLevelConfig().label}`;
   let oppTxt;
-  if (opponentType === 'stockfish') oppTxt = 'Opponent: Stockfish (single-thread)';
+  if (isAiVsAiActive()) {
+    oppTxt = `White=${aiVsAiEngines.w === 'stockfish' ? 'Stockfish' : 'Local AI'}, Black=${aiVsAiEngines.b === 'stockfish' ? 'Stockfish' : 'Local AI'}`;
+  } else if (opponentType === 'stockfish') oppTxt = 'Opponent: Stockfish (single-thread)';
   else oppTxt = 'Opponent: Local AI';
   document.getElementById('turnInfo').textContent = `${t} to move • ${sideTxt} • ${oppTxt} • ${levelTxt}`;
   document.getElementById('specialStatus').textContent = buildSpecialStatusText();
@@ -2109,6 +2307,12 @@ function postMoveChecksAndFlow(lastMoverColor) {
   }
   if (game.in_check()) {
     log(`${game.turn() === 'w' ? 'White' : 'Black'} is in check.`);
+  }
+
+  if (isAiVsAiActive()) {
+    scheduleAiVsAiMove();
+    startClockFor(game.turn());
+    return;
   }
 
   const myColor = getUserColorCode();
@@ -2271,9 +2475,11 @@ function sendStockfishGo(worker, fen) {
 
 function forceStockfishFallbackMove(reasonText) {
   if (!game || game.game_over()) return;
-  if (opponentType !== 'stockfish' && !sfDisabled) return;
-  const myColor = getUserColorCode();
-  if (game.turn() === myColor) return;
+  if (!isAiVsAiActive() && opponentType !== 'stockfish' && !sfDisabled) return;
+  if (!isAiVsAiActive()) {
+    const myColor = getUserColorCode();
+    if (game.turn() === myColor) return;
+  }
   sfInitInProgress = false;
   sfInitStartedTs = 0;
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
@@ -2287,6 +2493,10 @@ function forceStockfishFallbackMove(reasonText) {
 function startGame() {
   gameSessionId += 1;
   boardReadySessionId = 0;
+  clearAiVsAiTimer();
+  clearReplayTimer();
+  replayModeActive = false;
+  replayPly = 0;
   closeDemoOverlay();
   hideEndgameOverlay();
   clearHelpPreview();
@@ -2294,12 +2504,19 @@ function startGame() {
   resetTouchMoveSelection();
   modeName = document.getElementById('modeSelect').value;
   modeConfig = gameModes[modeName];
+  gameType = (document.getElementById('gameTypeSelect')?.value || 'human_vs_ai');
   userSide = (document.getElementById('sideSelect')?.value || 'white');
+  aiVsAiEngines = {
+    w: (document.getElementById('aiWhiteEngineSelect')?.value || 'local'),
+    b: (document.getElementById('aiBlackEngineSelect')?.value || 'local')
+  };
+  aiVsAiMoveDelayMs = parseInt((document.getElementById('aiVsAiSpeedSelect')?.value || '500'), 10) || 500;
   setupBoardLabels();
   opponentType = (document.getElementById('opponentSelect')?.value || 'local');
   aiLevel = (document.getElementById('levelSelect')?.value || 'intermediate');
   helpMode = (document.getElementById('helpSelect')?.value || 'off');
   timeControl = (document.getElementById('timeControlSelect')?.value || 'rapid');
+  updateGameTypeUI();
   updateOpponentHint();
 
   // Always stop any previous engine before starting a new game.
@@ -2317,7 +2534,7 @@ function startGame() {
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
 
   // Stockfish worker setup if needed
-  if (opponentType === 'stockfish') {
+  if (opponentType === 'stockfish' || aiVsAiNeedsStockfish()) {
     const startSessionId = gameSessionId;
     let sfRecoveryAttempts = 0;
     const sfMaxRecoveryAttempts = 3;
@@ -2655,13 +2872,18 @@ function startGame() {
           bindBoardTouchInput();
           resetTouchMoveSelection();
 
-          // If user plays Black, let opponent move first
-          const myColor = (userSide === 'white') ? 'w' : 'b';
-          if (myColor === 'b') {
-            if (opponentType === 'stockfish' && sfWorker) {
-              try { sfWantGo = true; sfWorker.postMessage('isready'); } catch (_) {}
+          // If AI-vs-AI, schedule first turn immediately.
+          if (isAiVsAiActive()) {
+            scheduleAiVsAiMove(Math.max(80, aiVsAiMoveDelayMs));
+          } else {
+            // If user plays Black, let opponent move first
+            const myColor = (userSide === 'white') ? 'w' : 'b';
+            if (myColor === 'b') {
+              if (opponentType === 'stockfish' && sfWorker) {
+                try { sfWantGo = true; sfWorker.postMessage('isready'); } catch (_) {}
+              }
+              setTimeout(() => maybeAIMove(), 250);
             }
-            setTimeout(() => maybeAIMove(), 250);
           }
         } catch (e) {
           console.error('Chessboard init error after load:', e);
@@ -2707,11 +2929,16 @@ function startGame() {
   updateTurnInfo();
   updateEloBoardPanel();
   startClockFor(game.turn());
-  log(`Game started in ${modeName.toUpperCase()} mode • AI level: ${getAiLevelConfig().label}.`);
+  if (isAiVsAiActive()) {
+    log(`Game started in ${modeName.toUpperCase()} mode • AI vs AI (${aiVsAiEngines.w} vs ${aiVsAiEngines.b}) • Level: ${getAiLevelConfig().label}.`);
+  } else {
+    log(`Game started in ${modeName.toUpperCase()} mode • AI level: ${getAiLevelConfig().label}.`);
+  }
 }
 
 function onDragStart(source, piece) {
   resetTouchMoveSelection();
+  if (isAiVsAiActive()) return false;
   if (!game || !gameActive || game.game_over() || isDemoRunning) return false;
   const turnColor = game.turn();         // 'w' or 'b'
   const myColor = (userSide === 'white') ? 'w' : 'b';
@@ -2832,6 +3059,7 @@ function resetTouchMoveSelection() {
 }
 
 function handleTouchSquareTap(square) {
+  if (isAiVsAiActive()) return;
   if (!game || !gameActive || game.game_over() || isDemoRunning) return;
   if (squareHandlerBindings.size > 0) return;
 
@@ -3116,7 +3344,30 @@ function triggerRandomEvent() {
 /* =========================
    Opponent move (Local greedy or Stockfish)
    ========================= */
+function scheduleAiVsAiMove(delayMs = null) {
+  clearAiVsAiTimer();
+  if (!isAiVsAiActive() || !game || !gameActive || game.game_over() || gameResultHandled || isDemoRunning) return;
+  const d = Math.max(40, Number.isFinite(delayMs) ? delayMs : aiVsAiMoveDelayMs);
+  aiVsAiTimer = setTimeout(() => runAiVsAiTurn(), d);
+}
+
+function runAiVsAiTurn() {
+  clearAiVsAiTimer();
+  if (!isAiVsAiActive() || !game || !gameActive || game.game_over() || gameResultHandled || isDemoRunning) return;
+  const engineForTurn = aiVsAiEngines[game.turn()] || 'local';
+  if (engineForTurn === 'stockfish') {
+    if (sfDisabled || !sfWorker) {
+      aiMoveLocalGreedy();
+      return;
+    }
+    aiMoveStockfish();
+  } else {
+    aiMoveLocalGreedy();
+  }
+}
+
 function maybeAIMove() {
+  if (isAiVsAiActive()) { runAiVsAiTurn(); return; }
   if (!game || !gameActive) { console.warn('[AI] maybeAIMove called while inactive'); return; }
   if (game.game_over()) { console.log('[AI] Game over, skipping AI move'); return; }
   const myColor = (userSide === 'white') ? 'w' : 'b';
@@ -3157,14 +3408,16 @@ function aiMoveStockfish() {
   if (!sfWorker) {
     console.warn('Stockfish worker not initialized');
     sfDisabled = true;
-    if (opponentType === 'stockfish') {
+    if (!isAiVsAiActive() && opponentType === 'stockfish') {
       opponentType = 'local';
       const oppSel = document.getElementById('opponentSelect');
       if (oppSel) oppSel.value = 'local';
       updateOpponentHint();
       updateTurnInfo();
     }
-    log('Stockfish unavailable; switched to Local AI for this game.');
+    log(isAiVsAiActive()
+      ? 'Stockfish unavailable for this turn; using Local AI fallback.'
+      : 'Stockfish unavailable; switched to Local AI for this game.');
     aiMoveLocalGreedy();
     return;
   }
@@ -3495,7 +3748,7 @@ function aiMoveLocalGreedy() {
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function setControlsDisabled(disabled) {
-  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','sideSelect','opponentSelect','levelSelect','helpSelect','timeControlSelect','askHelpBtn'].forEach(id => {
+  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !!disabled;
   });
@@ -3508,9 +3761,11 @@ function setControlsDisabled(disabled) {
 
 function startScenario(mode) {
   const modeSel = document.getElementById('modeSelect');
+  const gameTypeSelEl = document.getElementById('gameTypeSelect');
   const sideSel = document.getElementById('sideSelect');
   const oppSel = document.getElementById('opponentSelect');
   if (modeSel) modeSel.value = mode;
+  if (gameTypeSelEl) gameTypeSelEl.value = 'human_vs_ai';
   if (sideSel) sideSel.value = 'white';
   if (oppSel) oppSel.value = 'local';
   startGame();
@@ -4005,6 +4260,11 @@ async function runAssetCheck() {
 /* =========================
    Boot
    ========================= */
+if (gameTypeSel) gameType = gameTypeSel.value || 'human_vs_ai';
+if (aiWhiteSel) aiVsAiEngines.w = aiWhiteSel.value || 'local';
+if (aiBlackSel) aiVsAiEngines.b = aiBlackSel.value || 'local';
+if (aiVsAiSpeedSel) aiVsAiMoveDelayMs = parseInt(aiVsAiSpeedSel.value || '500', 10) || 500;
+updateGameTypeUI();
 setupBoardLabels();
 setupDemoOverlayDrag();
 hideEndgameOverlay();
@@ -4012,6 +4272,7 @@ updateOpponentHint();
 updateTurnInfo();
 updateEloBoardPanel();
 updateHelpInfo();
+updateReplayControlsState();
 runAssetCheck();
 log('Loaded. Choose a mode and click "Start Game".');
 </script>
