@@ -2441,9 +2441,8 @@ function startGame() {
   resolveRealisticPieces((pieceSet) => {
     const useInline = !pieceSet;
     boardConfig = {
-      // Keep drag enabled even on touch-capable devices so hybrid devices
-      // (e.g., Surface with touchscreen + mouse/trackpad) can use both inputs.
-      draggable: true,
+      // Hybrid devices (fine + touch) keep drag, touch-only devices use tap-to-move.
+      draggable: !!inputCapabilities.hasFine,
       position: 'start',
       onDragStart: onDragStart,
       onMouseoverSquare: onMouseoverSquare,
