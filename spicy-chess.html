@@ -517,6 +517,8 @@ let boardReadySessionId = 0;
 let hintSearchInProgress = false;
 let searchDeadlineAt = 0;
 let searchAbortFlag = false;
+let searchTT = new Map();
+const SEARCH_TT_MAX = 100000;
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -640,6 +642,14 @@ function getHelpTimeBudgetByLevel() {
   return 750; // intermediate default
 }
 
+function getLocalAiTimeBudgetByLevel() {
+  const lvl = String(aiLevel || 'intermediate');
+  if (lvl === 'beginner') return 180;
+  if (lvl === 'expert') return 650;
+  if (lvl === 'master') return 1150;
+  return 350; // intermediate default
+}
+
 function pickBestMoveDeterministic(depth) {
   const legal = game.moves({ verbose: true });
   if (!legal.length) return null;
@@ -659,6 +669,27 @@ function pickBestMoveDeterministic(depth) {
 
 function searchTimedOut() {
   return searchDeadlineAt > 0 && performance.now() >= searchDeadlineAt;
+}
+
+function resetSearchContext(budgetMs = 0, useTT = true) {
+  searchAbortFlag = false;
+  searchDeadlineAt = budgetMs > 0 ? (performance.now() + Math.max(80, budgetMs | 0)) : 0;
+  if (!useTT) searchTT.clear();
+}
+
+function endSearchContext() {
+  searchAbortFlag = false;
+  searchDeadlineAt = 0;
+}
+
+function ttGet(fen) {
+  return searchTT.get(fen) || null;
+}
+
+function ttSet(fen, entry) {
+  if (!fen || !entry) return;
+  if (searchTT.size >= SEARCH_TT_MAX) searchTT.clear();
+  searchTT.set(fen, entry);
 }
 
 async function pickBestMoveDeterministicTimed(maxDepth, budgetMs) {
@@ -708,8 +739,7 @@ async function pickBestMoveDeterministicTimed(maxDepth, budgetMs) {
     await new Promise(resolve => setTimeout(resolve, 0));
   }
 
-  searchDeadlineAt = 0;
-  searchAbortFlag = false;
+  endSearchContext();
   return bestCompleted || bestOverall || { move: rootMoves[0], score: 0, depth: 1, timedOut: true };
 }
 
@@ -3214,14 +3244,21 @@ function scoreMoveForOrdering(m) {
   if (m.captured) score += 10 * victim - attacker;
   if (m.promotion) score += 750;
   if (m.flags && m.flags.indexOf('e') !== -1) score += 105;
-  game.move(m);
-  if (game.in_check()) score += 90;
-  game.undo();
+  if (m.flags && m.flags.indexOf('k') !== -1) score += 40;
+  if (m.flags && m.flags.indexOf('q') !== -1) score += 35;
   return score;
 }
 
-function orderedMoves(moves) {
-  return moves.slice().sort((a, b) => scoreMoveForOrdering(b) - scoreMoveForOrdering(a));
+function orderedMoves(moves, pvMoveKey = '') {
+  const scored = [];
+  for (const m of moves) {
+    const key = m.from + m.to + (m.promotion || '');
+    let score = scoreMoveForOrdering(m);
+    if (pvMoveKey && key === pvMoveKey) score += 1000000;
+    scored.push({ m, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(x => x.m);
 }
 
 function quiescence(alpha, beta, depth = 0) {
@@ -3247,17 +3284,37 @@ function negamax(depth, alpha, beta) {
   if (searchTimedOut()) { searchAbortFlag = true; return evaluatePositionForSideToMove(); }
   if (depth <= 0) return quiescence(alpha, beta, 0);
   if (game.game_over()) return evaluatePositionForSideToMove();
-  const moves = orderedMoves(game.moves({ verbose: true }));
+  const alphaOrig = alpha;
+  const fen = game.fen();
+  const tt = ttGet(fen);
+  if (tt && tt.depth >= depth) {
+    if (tt.flag === 'EXACT') return tt.score;
+    if (tt.flag === 'LOWER') alpha = Math.max(alpha, tt.score);
+    else if (tt.flag === 'UPPER') beta = Math.min(beta, tt.score);
+    if (alpha >= beta) return tt.score;
+  }
+  const pvMoveKey = tt && tt.bestMoveKey ? tt.bestMoveKey : '';
+  const moves = orderedMoves(game.moves({ verbose: true }), pvMoveKey);
   if (!moves.length) return evaluatePositionForSideToMove();
   let best = -Infinity;
+  let bestMoveKey = '';
   for (const m of moves) {
     if (searchTimedOut()) { searchAbortFlag = true; break; }
     game.move(m);
     const score = -negamax(depth - 1, -beta, -alpha);
     game.undo();
-    if (score > best) best = score;
+    if (score > best) {
+      best = score;
+      bestMoveKey = m.from + m.to + (m.promotion || '');
+    }
     if (score > alpha) alpha = score;
     if (alpha >= beta) break;
+  }
+  if (best !== -Infinity) {
+    let flag = 'EXACT';
+    if (best <= alphaOrig) flag = 'UPPER';
+    else if (best >= beta) flag = 'LOWER';
+    ttSet(fen, { depth, score: best, flag, bestMoveKey });
   }
   return best;
 }
@@ -3288,23 +3345,62 @@ function pickLocalMoveByLevel() {
   if (bookMove) return bookMove;
 
   const cfg = getAiLevelConfig().local;
-  const depth = Math.max(1, cfg.depth | 0);
-  const scored = [];
-  for (const m of orderedMoves(legal)) {
-    game.move(m);
-    let score = -negamax(depth - 1, -Infinity, Infinity);
-    game.undo();
-    score += Math.random() * cfg.randomness;
-    scored.push({ m, score });
-  }
-  scored.sort((a, b) => b.score - a.score);
+  const maxDepth = Math.max(1, cfg.depth | 0);
+  const budgetMs = getLocalAiTimeBudgetByLevel();
+  resetSearchContext(budgetMs, true);
 
-  if (Math.random() < cfg.blunderRate && scored.length > 1) {
-    const worstBandStart = Math.max(1, Math.floor(scored.length * 0.7));
-    const idx = worstBandStart + Math.floor(Math.random() * (scored.length - worstBandStart));
-    return scored[idx].m;
+  let rootMoves = orderedMoves(legal);
+  let bestAny = null;
+  let bestCompleted = null;
+  let lastScored = null;
+
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    if (searchTimedOut()) break;
+    if (bestCompleted && bestCompleted.m) {
+      const pv = bestCompleted.m.from + bestCompleted.m.to + (bestCompleted.m.promotion || '');
+      rootMoves = orderedMoves(rootMoves, pv);
+    }
+    const scored = [];
+    let best = null;
+    let bestScore = -Infinity;
+    for (const m of rootMoves) {
+      if (searchTimedOut()) { searchAbortFlag = true; break; }
+      game.move(m);
+      const score = -negamax(depth - 1, -Infinity, Infinity);
+      game.undo();
+      scored.push({ m, score });
+      if (score > bestScore) {
+        bestScore = score;
+        best = m;
+      }
+    }
+    if (best) bestAny = { m: best, score: bestScore, depth };
+    if (best && !searchAbortFlag) bestCompleted = { m: best, score: bestScore, depth };
+    if (scored.length) {
+      lastScored = scored;
+      lastScored.sort((a, b) => b.score - a.score);
+    }
+    if (searchAbortFlag) break;
   }
-  return scored[0].m;
+
+  endSearchContext();
+  if (!bestAny) return rootMoves[0] || null;
+
+  if (lastScored && Math.random() < cfg.blunderRate && lastScored.length > 1) {
+    const worstBandStart = Math.max(1, Math.floor(lastScored.length * 0.7));
+    const idx = worstBandStart + Math.floor(Math.random() * (lastScored.length - worstBandStart));
+    return lastScored[idx].m;
+  }
+
+  const chosen = (bestCompleted && bestCompleted.m) ? bestCompleted.m : bestAny.m;
+  if (cfg.randomness > 0 && lastScored && lastScored.length > 1) {
+    // Keep Master nearly deterministic while preserving slight variety at lower levels.
+    const gap = lastScored[0].score - lastScored[1].score;
+    if (gap < (20 + cfg.randomness * 50) && Math.random() < Math.min(0.2, cfg.randomness * 0.2)) {
+      return lastScored[1].m;
+    }
+  }
+  return chosen;
 }
 
 function aiMoveLocalGreedy() {
