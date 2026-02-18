@@ -513,6 +513,7 @@ const squareHandlerBindings = new Map();
 let helpPreviewMove = { from: null, to: null };
 let helpPreviewTimer = null;
 let demoDialogArmedAt = 0;
+let boardReadySessionId = 0;
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -2104,6 +2105,7 @@ function forceStockfishFallbackMove(reasonText) {
    ========================= */
 function startGame() {
   gameSessionId += 1;
+  boardReadySessionId = 0;
   closeDemoOverlay();
   hideEndgameOverlay();
   clearHelpPreview();
@@ -2466,6 +2468,7 @@ function startGame() {
       const initBoard = () => {
         try {
           board = Chessboard('board', boardConfig);
+          boardReadySessionId = gameSessionId;
           // Orient to player's side
           board.orientation(userSide === 'black' ? 'black' : 'white');
           applyBoardHighlights();
@@ -3266,7 +3269,7 @@ function startScenario(mode) {
 async function waitForBoardReady(timeoutMs = 4000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (game && board && typeof board.position === 'function') return true;
+    if (game && board && typeof board.position === 'function' && boardReadySessionId === gameSessionId) return true;
     await sleep(50);
   }
   return false;
