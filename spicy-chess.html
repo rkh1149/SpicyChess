@@ -97,6 +97,7 @@
     }
     .board-actions { margin-top: 8px; text-align: center; }
     .board-action-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+    #aiReplayRow { display: none; }
     #touchHint {
       margin-top: 8px;
       font-size: 0.78rem;
@@ -362,6 +363,14 @@
           <button id="startBtn" class="primary-btn">Start Game</button>
           <button id="resignBtn" title="Resign the current game">Resign</button>
         </div>
+        <div id="aiReplayRow" class="board-action-row">
+          <button id="replayStartBtn" type="button">Replay Start</button>
+          <button id="replayPrevBtn" type="button">Prev</button>
+          <button id="replayNextBtn" type="button">Next</button>
+          <button id="replayPlayBtn" type="button">Play</button>
+          <button id="replayPauseBtn" type="button">Pause</button>
+          <button id="replayEndBtn" type="button">Replay End</button>
+        </div>
         <button id="askHelpBtn" style="display:none;" title="Ask for your best next move">Ask Best Move</button>
         <div id="touchHint">Touch controls: tap a piece, then tap its destination square.</div>
         <div id="eloBoardPanel">
@@ -507,12 +516,6 @@
           <div id="moveHistoryList"></div>
           <div id="moveHistoryActions">
             <button id="exportPgnBtn" type="button">Export PGN</button>
-            <button id="replayStartBtn" type="button">Replay Start</button>
-            <button id="replayPrevBtn" type="button">Prev</button>
-            <button id="replayNextBtn" type="button">Next</button>
-            <button id="replayPlayBtn" type="button">Play</button>
-            <button id="replayPauseBtn" type="button">Pause</button>
-            <button id="replayEndBtn" type="button">Replay End</button>
           </div>
         </details>
         <details id="logDetails" open>
@@ -537,6 +540,7 @@ let gameType = 'human_vs_ai';   // human_vs_ai | ai_vs_ai
 let aiVsAiEngines = { w: 'local', b: 'local' };
 let aiVsAiMoveDelayMs = 500;
 let aiVsAiTimer = null;
+let aiVsAiPaused = false;
 
 // Opponents
 let opponentType = 'local';      // 'local' | 'stockfish'
@@ -975,11 +979,13 @@ function updateGameTypeUI() {
   const whiteWrap = document.getElementById('aiWhiteEngineSelect')?.closest('.control-item');
   const blackWrap = document.getElementById('aiBlackEngineSelect')?.closest('.control-item');
   const speedWrap = document.getElementById('aiVsAiSpeedSelect')?.closest('.control-item');
+  const replayRow = document.getElementById('aiReplayRow');
   if (sideWrap) sideWrap.style.display = isA ? 'none' : '';
   if (oppWrap) oppWrap.style.display = isA ? 'none' : '';
   if (whiteWrap) whiteWrap.style.display = isA ? '' : 'none';
   if (blackWrap) blackWrap.style.display = isA ? '' : 'none';
   if (speedWrap) speedWrap.style.display = isA ? '' : 'none';
+  if (replayRow) replayRow.style.display = isA ? 'flex' : 'none';
 }
 
 /* =========================
@@ -1314,31 +1320,56 @@ function jumpToPly(ply) {
 }
 
 function updateReplayControlsState() {
-  const hasData = !!(game && moveHistory.length > 1);
-  const atStart = replayPly <= 0;
-  const atEnd = replayPly >= Math.max(0, moveHistory.length - 1);
+  const liveAi = !!(isAiVsAiActive() && game && gameActive && !gameResultHandled);
+  const hasData = !!(game && moveHistory.length > 0);
+  const latest = Math.max(0, moveHistory.length - 1);
+  const current = liveAi ? (replayModeActive ? replayPly : latest) : replayPly;
+  const atStart = current <= 0;
+  const atEnd = current >= latest;
   if (replayStartBtn) replayStartBtn.disabled = !hasData || atStart;
   if (replayPrevBtn) replayPrevBtn.disabled = !hasData || atStart;
   if (replayNextBtn) replayNextBtn.disabled = !hasData || atEnd;
   if (replayEndBtn) replayEndBtn.disabled = !hasData || atEnd;
-  if (replayPlayBtn) replayPlayBtn.disabled = !hasData || atEnd || !!replayTimer;
-  if (replayPauseBtn) replayPauseBtn.disabled = !replayTimer;
+  if (replayPlayBtn) {
+    if (liveAi) replayPlayBtn.disabled = !hasData || (!aiVsAiPaused && !replayModeActive);
+    else replayPlayBtn.disabled = !hasData || atEnd || !!replayTimer;
+  }
+  if (replayPauseBtn) {
+    if (liveAi) replayPauseBtn.disabled = !hasData || aiVsAiPaused;
+    else replayPauseBtn.disabled = !replayTimer;
+  }
 }
 
 function replayJumpTo(targetPly) {
   if (!game || !board || !moveHistory.length) return;
-  clearReplayTimer();
+  const liveAi = !!(isAiVsAiActive() && gameActive && !gameResultHandled);
+  if (liveAi) {
+    aiVsAiPaused = true;
+    clearAiVsAiTimer();
+  } else {
+    clearReplayTimer();
+  }
   replayModeActive = true;
   const maxPly = Math.max(0, moveHistory.length - 1);
   replayPly = Math.max(0, Math.min(maxPly, targetPly | 0));
   const fen = moveHistory[replayPly];
-  if (!fen || !game.load(fen)) return;
-  board.position(game.fen());
+  if (!fen) return;
+  if (liveAi) {
+    board.position(fen);
+  } else {
+    if (!game.load(fen)) return;
+    board.position(game.fen());
+  }
   setLastMove(null, null);
   updateTurnInfo();
   refreshSpecialButtons();
-  stopClockTicker();
-  updateClockUI(null);
+  if (liveAi) {
+    stopClockTicker();
+    updateClockUI(null);
+  } else {
+    stopClockTicker();
+    updateClockUI(null);
+  }
   updateReplayControlsState();
 }
 
@@ -1349,12 +1380,28 @@ function replayStep(delta) {
 }
 
 function pauseReplayAutoPlay() {
-  clearReplayTimer();
+  if (isAiVsAiActive() && game && gameActive && !gameResultHandled) {
+    aiVsAiPaused = true;
+    clearAiVsAiTimer();
+  } else {
+    clearReplayTimer();
+  }
   updateReplayControlsState();
 }
 
 function startReplayAutoPlay() {
   if (!game || !moveHistory.length) return;
+  if (isAiVsAiActive() && gameActive && !gameResultHandled) {
+    // Resume live AI-vs-AI from current game position.
+    replayModeActive = false;
+    replayPly = Math.max(0, moveHistory.length - 1);
+    aiVsAiPaused = false;
+    try { board.position(game.fen()); } catch (_) {}
+    scheduleAiVsAiMove(Math.max(60, aiVsAiMoveDelayMs));
+    startClockFor(game.turn());
+    updateReplayControlsState();
+    return;
+  }
   if (!replayModeActive) replayJumpTo(0);
   clearReplayTimer();
   replayTimer = setInterval(() => {
@@ -2497,6 +2544,7 @@ function startGame() {
   clearReplayTimer();
   replayModeActive = false;
   replayPly = 0;
+  aiVsAiPaused = false;
   closeDemoOverlay();
   hideEndgameOverlay();
   clearHelpPreview();
@@ -3346,14 +3394,14 @@ function triggerRandomEvent() {
    ========================= */
 function scheduleAiVsAiMove(delayMs = null) {
   clearAiVsAiTimer();
-  if (!isAiVsAiActive() || !game || !gameActive || game.game_over() || gameResultHandled || isDemoRunning) return;
+  if (!isAiVsAiActive() || aiVsAiPaused || !game || !gameActive || game.game_over() || gameResultHandled || isDemoRunning) return;
   const d = Math.max(40, Number.isFinite(delayMs) ? delayMs : aiVsAiMoveDelayMs);
   aiVsAiTimer = setTimeout(() => runAiVsAiTurn(), d);
 }
 
 function runAiVsAiTurn() {
   clearAiVsAiTimer();
-  if (!isAiVsAiActive() || !game || !gameActive || game.game_over() || gameResultHandled || isDemoRunning) return;
+  if (!isAiVsAiActive() || aiVsAiPaused || !game || !gameActive || game.game_over() || gameResultHandled || isDemoRunning) return;
   const engineForTurn = aiVsAiEngines[game.turn()] || 'local';
   if (engineForTurn === 'stockfish') {
     if (sfDisabled || !sfWorker) {
