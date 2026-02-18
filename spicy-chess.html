@@ -514,6 +514,9 @@ let helpPreviewMove = { from: null, to: null };
 let helpPreviewTimer = null;
 let demoDialogArmedAt = 0;
 let boardReadySessionId = 0;
+let hintSearchInProgress = false;
+let searchDeadlineAt = 0;
+let searchAbortFlag = false;
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -629,6 +632,14 @@ function getHelpDepthByLevel() {
   return Math.min(4, base + 1);
 }
 
+function getHelpTimeBudgetByLevel() {
+  const lvl = String(aiLevel || 'intermediate');
+  if (lvl === 'beginner') return 450;
+  if (lvl === 'expert') return 1000;
+  if (lvl === 'master') return 1400;
+  return 750; // intermediate default
+}
+
 function pickBestMoveDeterministic(depth) {
   const legal = game.moves({ verbose: true });
   if (!legal.length) return null;
@@ -646,13 +657,69 @@ function pickBestMoveDeterministic(depth) {
   return { move: best, score: bestScore };
 }
 
+function searchTimedOut() {
+  return searchDeadlineAt > 0 && performance.now() >= searchDeadlineAt;
+}
+
+async function pickBestMoveDeterministicTimed(maxDepth, budgetMs) {
+  const legal = game.moves({ verbose: true });
+  if (!legal.length) return null;
+  const bookMove = pickOpeningBookMove();
+  if (bookMove) return { move: bookMove, score: 0, depth: 0, timedOut: false, fromBook: true };
+
+  let rootMoves = orderedMoves(legal);
+  let bestOverall = null;
+  let bestCompleted = null;
+  const tEnd = performance.now() + Math.max(250, budgetMs | 0);
+
+  for (let depth = 1; depth <= Math.max(1, maxDepth | 0); depth++) {
+    if (performance.now() >= tEnd) break;
+    if (bestCompleted && bestCompleted.move) {
+      const key = bestCompleted.move.from + bestCompleted.move.to + (bestCompleted.move.promotion || '');
+      rootMoves = rootMoves.slice().sort((a, b) => {
+        const ka = a.from + a.to + (a.promotion || '');
+        const kb = b.from + b.to + (b.promotion || '');
+        if (ka === key) return -1;
+        if (kb === key) return 1;
+        return 0;
+      });
+    }
+
+    searchAbortFlag = false;
+    searchDeadlineAt = tEnd;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const m of rootMoves) {
+      if (searchTimedOut()) { searchAbortFlag = true; break; }
+      game.move(m);
+      const score = -negamax(depth - 1, -Infinity, Infinity);
+      game.undo();
+      if (score > bestScore) {
+        bestScore = score;
+        best = m;
+      }
+    }
+
+    if (best) bestOverall = { move: best, score: bestScore, depth, timedOut: searchAbortFlag };
+    if (best && !searchAbortFlag) bestCompleted = { move: best, score: bestScore, depth, timedOut: false };
+    if (searchAbortFlag) break;
+
+    // Yield between depth iterations so UI can update.
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  searchDeadlineAt = 0;
+  searchAbortFlag = false;
+  return bestCompleted || bestOverall || { move: rootMoves[0], score: 0, depth: 1, timedOut: true };
+}
+
 function updateHelpButtonState() {
   const btn = document.getElementById('askHelpBtn');
   if (!btn) return;
   const on = helpMode === 'on';
   btn.style.display = on ? 'inline-block' : 'none';
   if (!on) { btn.disabled = true; return; }
-  const canAsk = !!(game && !game.game_over() && game.turn() === getUserColorCode() && !isDemoRunning);
+  const canAsk = !!(game && !game.game_over() && game.turn() === getUserColorCode() && !isDemoRunning && !hintSearchInProgress);
   btn.disabled = !canAsk;
 }
 
@@ -688,28 +755,40 @@ function updateHelpInfo() {
   updateHelpButtonState();
 }
 
-function onAskHelpClick() {
+async function onAskHelpClick() {
   if (helpMode !== 'on') return;
   const el = document.getElementById('helpInfo');
   if (!el) return;
+  if (hintSearchInProgress) return;
   if (!game) { el.textContent = 'Help: Start a game first.'; updateHelpButtonState(); return; }
   if (game.game_over()) { el.textContent = 'Help: Game over.'; updateHelpButtonState(); return; }
   if (game.turn() !== getUserColorCode()) { el.textContent = 'Help: It is not your turn yet.'; updateHelpButtonState(); return; }
-  const depth = getHelpDepthByLevel();
-  const best = pickBestMoveDeterministic(depth);
-  if (!best || !best.move) {
-    el.textContent = 'Help: No legal move found.';
-    clearHelpPreview();
-    updateHelpButtonState();
-    return;
-  }
-  const mv = best.move;
-  const sanText = escapeHtml(mv.san || '?');
-  const fromText = escapeHtml(mv.from || '--');
-  const toText = escapeHtml(mv.to || '--');
-  el.innerHTML = `Help: Best move is <strong>${sanText}</strong> (<span class="hint-from-text">${fromText}</span> to <span class="hint-to-text">${toText}</span>).`;
-  showHelpPreview(mv.from, mv.to, 3000);
+  hintSearchInProgress = true;
   updateHelpButtonState();
+  el.textContent = 'Help: Calculating best move...';
+  await new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    const depth = getHelpDepthByLevel();
+    const budgetMs = getHelpTimeBudgetByLevel();
+    const best = await pickBestMoveDeterministicTimed(depth, budgetMs);
+    if (!best || !best.move) {
+      el.textContent = 'Help: No legal move found.';
+      clearHelpPreview();
+      return;
+    }
+    const mv = best.move;
+    const sanText = escapeHtml(mv.san || '?');
+    const fromText = escapeHtml(mv.from || '--');
+    const toText = escapeHtml(mv.to || '--');
+    let suffix = '';
+    if (best.fromBook) suffix = ' (opening book)';
+    else if (best.timedOut) suffix = ' (time-limited search)';
+    el.innerHTML = `Help: Best move is <strong>${sanText}</strong> (<span class="hint-from-text">${fromText}</span> to <span class="hint-to-text">${toText}</span>)${suffix}.`;
+    showHelpPreview(mv.from, mv.to, 3000);
+  } finally {
+    hintSearchInProgress = false;
+    updateHelpButtonState();
+  }
 }
 
 function updateOpponentHint() {
@@ -3146,6 +3225,7 @@ function orderedMoves(moves) {
 }
 
 function quiescence(alpha, beta, depth = 0) {
+  if (searchTimedOut()) { searchAbortFlag = true; return evaluatePositionForSideToMove(); }
   const standPat = evaluatePositionForSideToMove();
   if (standPat >= beta) return beta;
   if (alpha < standPat) alpha = standPat;
@@ -3153,6 +3233,7 @@ function quiescence(alpha, beta, depth = 0) {
 
   const tactical = orderedMoves(game.moves({ verbose: true }).filter(m => m.captured || m.promotion || (m.flags && m.flags.indexOf('e') !== -1)));
   for (const m of tactical) {
+    if (searchTimedOut()) { searchAbortFlag = true; break; }
     game.move(m);
     const score = -quiescence(-beta, -alpha, depth + 1);
     game.undo();
@@ -3163,12 +3244,14 @@ function quiescence(alpha, beta, depth = 0) {
 }
 
 function negamax(depth, alpha, beta) {
+  if (searchTimedOut()) { searchAbortFlag = true; return evaluatePositionForSideToMove(); }
   if (depth <= 0) return quiescence(alpha, beta, 0);
   if (game.game_over()) return evaluatePositionForSideToMove();
   const moves = orderedMoves(game.moves({ verbose: true }));
   if (!moves.length) return evaluatePositionForSideToMove();
   let best = -Infinity;
   for (const m of moves) {
+    if (searchTimedOut()) { searchAbortFlag = true; break; }
     game.move(m);
     const score = -negamax(depth - 1, -beta, -alpha);
     game.undo();
