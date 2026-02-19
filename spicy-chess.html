@@ -2049,7 +2049,7 @@ async function analyzeGameRatingsWithStockfish(fens) {
   const thinkAfterMs = mainThreadLike ? 18 : 55;
   const depthBefore = null;
   const depthAfter = null;
-  const timeBudgetMs = mainThreadLike ? 2400 : 12000;
+  const timeBudgetMs = mainThreadLike ? 6000 : 26000;
   const startTs = Date.now();
   const sampledTotal = Math.max(1, Math.ceil(totalPlies / stride));
   let sampledDone = 0;
@@ -2079,7 +2079,7 @@ async function analyzeGameRatingsWithStockfish(fens) {
   try {
     atrace('start', { totalPlies, stride, sampledTotal, mainThreadLike });
     stallWatch = setInterval(() => {
-      if ((Date.now() - lastProgressTs) > 3200) {
+      if ((Date.now() - lastProgressTs) > 5000) {
         abortedForStall = true;
         lastProgressTs = Date.now();
         try { analyzer.cancelCurrentEval && analyzer.cancelCurrentEval(); } catch (_) {}
@@ -2150,7 +2150,7 @@ async function finalizeGameRatings(reasonText, scoreWhite, sessionIdAtEnd) {
     new Promise((resolve) => setTimeout(() => {
       analyzeTimedOut = true;
       resolve(null);
-    }, 12000))
+    }, 30000))
   ]);
   if (sessionIdAtEnd !== gameSessionId) return;
 
