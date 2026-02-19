@@ -287,11 +287,11 @@
     #demoYesBtn, #demoNoBtn { min-width: 72px; }
 
     #endgameOverlay {
-      position: absolute;
-      left: 42px;
-      top: calc(var(--board-size) * 0.3);
-      width: min(360px, calc(var(--board-size) - 20px));
-      z-index: 11;
+      position: fixed;
+      left: 20px;
+      top: 150px;
+      width: min(360px, calc(100vw - 24px));
+      z-index: 13;
       display: none;
       pointer-events: none;
     }
@@ -305,6 +305,7 @@
       box-shadow: 0 10px 28px rgba(17, 24, 39, 0.2);
     }
     #endgameOverlayTitle { margin: 0 0 6px; font-size: 0.95rem; }
+    #endgameOverlayTitle.endgame-drag-handle { cursor: move; user-select: none; }
     #endgameOverlayBody { margin: 0; font-size: 0.86rem; color: #3f4f67; }
 
     /* Hide Chessboard.js internal coordinates (if injected) */
@@ -563,6 +564,7 @@ let sfBestmoveTimer = null;
 let sfInitInProgress = false;
 let sfInitStartedTs = 0;
 let sfDisabled = false;
+let sfPvCache = { fen: '', moves: {} };
 let aiServerUrl = '';            // (unused here—kept for compatibility)
 
 let moveHistory = [];            // list of FENs (for Back in Time)
@@ -576,6 +578,7 @@ let lastMoveSquares = { from: null, to: null };
 let legalTargetSquares = [];
 let demoDecisionResolver = null;
 let demoDragState = { active: false, dx: 0, dy: 0 };
+let endgameDragState = { active: false, dx: 0, dy: 0 };
 let gameResultHandled = false;
 let gameStatusOverride = null;   // { text, kind }
 let gameRatings = {
@@ -2304,6 +2307,38 @@ function setupDemoOverlayDrag() {
   });
 }
 
+function setupEndgameOverlayDrag() {
+  const overlay = document.getElementById('endgameOverlay');
+  const handle = document.getElementById('endgameOverlayTitle');
+  if (!overlay || !handle) return;
+  handle.classList.add('endgame-drag-handle');
+
+  handle.addEventListener('pointerdown', (e) => {
+    if (!overlay.classList.contains('show')) return;
+    const rect = overlay.getBoundingClientRect();
+    endgameDragState.active = true;
+    endgameDragState.dx = e.clientX - rect.left;
+    endgameDragState.dy = e.clientY - rect.top;
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+
+  const stopDrag = () => { endgameDragState.active = false; };
+  window.addEventListener('pointerup', stopDrag);
+  window.addEventListener('pointercancel', stopDrag);
+  window.addEventListener('pointermove', (e) => {
+    if (!endgameDragState.active) return;
+    let left = e.clientX - endgameDragState.dx;
+    let top = e.clientY - endgameDragState.dy;
+    const maxLeft = Math.max(0, window.innerWidth - overlay.offsetWidth - 8);
+    const maxTop = Math.max(0, window.innerHeight - overlay.offsetHeight - 8);
+    left = Math.max(0, Math.min(left, maxLeft));
+    top = Math.max(0, Math.min(top, maxTop));
+    overlay.style.left = `${left}px`;
+    overlay.style.top = `${top}px`;
+  });
+}
+
 function updateTurnInfo() {
   if (!game) {
     document.getElementById('turnInfo').textContent = '';
@@ -2533,13 +2568,75 @@ function setupBoardLabels() {
   for (const ch of files) { const d = document.createElement('div'); d.textContent = ch; f.appendChild(d); }
 }
 
+function getStockfishVarietyConfig() {
+  const lvl = String(aiLevel || 'intermediate');
+  if (lvl === 'beginner') return { multipv: 4, altChance: 0.34, cpWindow: 45 };
+  if (lvl === 'expert') return { multipv: 2, altChance: 0.10, cpWindow: 22 };
+  if (lvl === 'master') return { multipv: 2, altChance: 0.04, cpWindow: 14 };
+  return { multipv: 3, altChance: 0.20, cpWindow: 30 };
+}
+
+function resetStockfishPvCache(fen) {
+  sfPvCache = { fen: String(fen || ''), moves: {} };
+}
+
+function recordStockfishPvInfo(line, fen) {
+  if (!line || !line.startsWith('info ')) return;
+  const uciMatch = line.match(/\bpv\s+([a-h][1-8][a-h][1-8][qrbn]?)/i);
+  if (!uciMatch) return;
+  const move = String(uciMatch[1] || '').toLowerCase();
+  if (!move) return;
+  const rankMatch = line.match(/\bmultipv\s+(\d+)/i);
+  const rank = rankMatch ? Math.max(1, parseInt(rankMatch[1], 10) || 1) : 1;
+  const score = parseUciScore(line);
+  if (sfPvCache.fen !== String(fen || '')) resetStockfishPvCache(fen);
+  sfPvCache.moves[move] = {
+    move,
+    rank,
+    score: Number.isFinite(score) ? score : null
+  };
+}
+
+function chooseStockfishMoveWithVariety(bestUci, fen) {
+  const best = String(bestUci || '').toLowerCase();
+  if (!best) return best;
+  const cfg = getStockfishVarietyConfig();
+  if (sfPvCache.fen !== String(fen || '')) return best;
+  const list = Object.values(sfPvCache.moves || {});
+  if (!list.length) return best;
+  if (!list.some(x => x.move === best)) list.push({ move: best, rank: 999, score: null });
+  const byMove = new Map(list.map(x => [x.move, x]));
+  const primary = byMove.get(best);
+  const primaryScore = primary && Number.isFinite(primary.score) ? primary.score : null;
+  const finite = list.filter(x => Number.isFinite(x.score));
+  if (!finite.length) return best;
+  finite.sort((a, b) => (b.score - a.score) || (a.rank - b.rank));
+  const topScore = primaryScore == null ? finite[0].score : primaryScore;
+  const elig = finite
+    .filter(x => x.move !== best)
+    .map(x => ({ ...x, gap: topScore - x.score }))
+    .filter(x => x.gap >= 0 && x.gap <= cfg.cpWindow);
+  if (!elig.length) return best;
+  if (Math.random() >= cfg.altChance) return best;
+  const weights = elig.map(x => 1 / (1 + x.gap));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < elig.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return elig[i].move;
+  }
+  return elig[0].move;
+}
+
 function configureStockfishForLevel(worker) {
   if (!worker) return;
   const send = worker._send ? worker._send : (m)=>{ try{ worker.postMessage(m);}catch(_){ } };
   const cfg = getAiLevelConfig().stockfish;
+  const vcfg = getStockfishVarietyConfig();
   send(`setoption name Skill Level value ${cfg.skill}`);
   send('setoption name UCI_LimitStrength value true');
   send(`setoption name UCI_Elo value ${cfg.elo}`);
+  send(`setoption name MultiPV value ${vcfg.multipv}`);
 }
 
 function sendStockfishGo(worker, fen) {
@@ -2549,6 +2646,7 @@ function sendStockfishGo(worker, fen) {
   sfInitStartedTs = 0;
   sfLastGoFen = fen;
   sfLastGoTs = Date.now();
+  resetStockfishPvCache(fen);
   if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
   send(`position fen ${fen}`);
   send(`go movetime ${cfg.movetimeMs}`);
@@ -2668,14 +2766,19 @@ function startGame() {
             continue;
           }
 
+          if (line.startsWith('info ')) {
+            recordStockfishPvInfo(line, sfLastGoFen || (game ? game.fen() : ''));
+          }
+
           if (line.includes('bestmove')) {
-            if (opponentType !== 'stockfish' || !game || game.game_over()) return;
+            if ((!isAiVsAiActive() && opponentType !== 'stockfish') || !game || game.game_over()) return;
             if (sfLastGoFen && game.fen() !== sfLastGoFen) {
               console.log('[SF] Ignoring stale bestmove for old position');
               continue;
             }
             const match = line.match(/bestmove\s+([a-h][1-8][a-h][1-8][qrbn]?)/i);
-            const uci = match ? match[1].toLowerCase() : '';
+            const rawUci = match ? match[1].toLowerCase() : '';
+            const uci = chooseStockfishMoveWithVariety(rawUci, sfLastGoFen || (game ? game.fen() : ''));
             if (uci && uci.length >= 4) {
               if (sfBestmoveTimer) { clearTimeout(sfBestmoveTimer); sfBestmoveTimer = null; }
               const from = uci.slice(0,2), to = uci.slice(2,4), promo = uci.slice(4) || undefined;
@@ -4354,6 +4457,7 @@ if (strengthPresetSel) strengthPreset = strengthPresetSel.value || 'strong';
 updateGameTypeUI();
 setupBoardLabels();
 setupDemoOverlayDrag();
+setupEndgameOverlayDrag();
 hideEndgameOverlay();
 updateOpponentHint();
 updateTurnInfo();
