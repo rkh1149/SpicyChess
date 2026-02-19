@@ -448,6 +448,13 @@
             </select>
           </div>
           <div class="control-item">
+            <label for="strengthPresetSelect">Strength Preset</label>
+            <select id="strengthPresetSelect" title="Trade speed vs strength for both Local AI and Stockfish">
+              <option value="fast">Fast</option>
+              <option value="strong" selected>Strong</option>
+            </select>
+          </div>
+          <div class="control-item">
             <label for="helpSelect">Ask for help</label>
             <select id="helpSelect" title="Show recommended next move for your side">
               <option value="off" selected>Off</option>
@@ -545,6 +552,7 @@ let aiVsAiPaused = false;
 // Opponents
 let opponentType = 'local';      // 'local' | 'stockfish'
 let aiLevel = 'intermediate';    // beginner | intermediate | expert | master
+let strengthPreset = 'strong';   // fast | strong
 let helpMode = 'off';            // off | on
 let sfWorker = null;
 let sfReady = false;
@@ -681,28 +689,44 @@ const gameModes = {
 const aiLevels = {
   beginner: {
     label: 'Beginner',
-    stockfish: { skill: 3, movetimeMs: 350, depth: 8, elo: 900 },
-    local: { depth: 1, blunderRate: 0.50, randomness: 2.2 }
+    stockfish: { skill: 6, movetimeMs: 700, depth: 10, elo: 1200 },
+    local: { depth: 2, blunderRate: 0.20, randomness: 0.8 }
   },
   intermediate: {
     label: 'Intermediate',
-    stockfish: { skill: 8, movetimeMs: 900, depth: 12, elo: 1400 },
-    local: { depth: 2, blunderRate: 0.15, randomness: 0.7 }
+    stockfish: { skill: 12, movetimeMs: 1300, depth: 14, elo: 1700 },
+    local: { depth: 3, blunderRate: 0.07, randomness: 0.25 }
   },
   expert: {
     label: 'Expert',
-    stockfish: { skill: 14, movetimeMs: 1600, depth: 16, elo: 1900 },
-    local: { depth: 2, blunderRate: 0.03, randomness: 0.15 }
+    stockfish: { skill: 17, movetimeMs: 2200, depth: 18, elo: 2200 },
+    local: { depth: 4, blunderRate: 0.015, randomness: 0.05 }
   },
   master: {
     label: 'Master',
-    stockfish: { skill: 20, movetimeMs: 2600, depth: 22, elo: 2400 },
-    local: { depth: 3, blunderRate: 0.0, randomness: 0.01 }
+    stockfish: { skill: 20, movetimeMs: 3200, depth: 24, elo: 2600 },
+    local: { depth: 5, blunderRate: 0.0, randomness: 0.0 }
   }
 };
 
 function getAiLevelConfig() {
-  return aiLevels[aiLevel] || aiLevels.intermediate;
+  const base = aiLevels[aiLevel] || aiLevels.intermediate;
+  const fast = String(strengthPreset || 'strong') === 'fast';
+  if (!fast) return base;
+  return {
+    label: `${base.label} (Fast)`,
+    stockfish: {
+      skill: Math.max(1, (base.stockfish.skill | 0) - 3),
+      movetimeMs: Math.max(250, Math.round(base.stockfish.movetimeMs * 0.6)),
+      depth: Math.max(6, (base.stockfish.depth | 0) - 2),
+      elo: Math.max(800, (base.stockfish.elo | 0) - 250)
+    },
+    local: {
+      depth: Math.max(1, (base.local.depth | 0) - 1),
+      blunderRate: Math.min(0.9, Number(base.local.blunderRate || 0) * 1.35),
+      randomness: Number(base.local.randomness || 0) * 1.5
+    }
+  };
 }
 
 function getHelpDepthByLevel() {
@@ -721,10 +745,13 @@ function getHelpTimeBudgetByLevel() {
 
 function getLocalAiTimeBudgetByLevel() {
   const lvl = String(aiLevel || 'intermediate');
-  if (lvl === 'beginner') return 180;
-  if (lvl === 'expert') return 650;
-  if (lvl === 'master') return 1150;
-  return 350; // intermediate default
+  const base = (lvl === 'beginner') ? 320
+    : (lvl === 'expert') ? 1200
+    : (lvl === 'master') ? 1800
+    : 700; // intermediate default
+  return (String(strengthPreset || 'strong') === 'fast')
+    ? Math.max(140, Math.round(base * 0.65))
+    : base;
 }
 
 function pickBestMoveDeterministic(depth) {
@@ -1004,6 +1031,7 @@ const aiWhiteSel = document.getElementById('aiWhiteEngineSelect');
 const aiBlackSel = document.getElementById('aiBlackEngineSelect');
 const aiVsAiSpeedSel = document.getElementById('aiVsAiSpeedSelect');
 const levelSel = document.getElementById('levelSelect');
+const strengthPresetSel = document.getElementById('strengthPresetSelect');
 const helpSel = document.getElementById('helpSelect');
 const sideSel = document.getElementById('sideSelect');
 const modeSel = document.getElementById('modeSelect');
@@ -1056,6 +1084,15 @@ if (levelSel) {
     aiLevel = levelSel.value;
     updateOpponentHint();
     updateHelpInfo();
+    updateTurnInfo();
+  });
+}
+if (strengthPresetSel) {
+  strengthPresetSel.addEventListener('change', () => {
+    strengthPreset = strengthPresetSel.value || 'strong';
+    updateOpponentHint();
+    updateHelpInfo();
+    updateTurnInfo();
   });
 }
 if (helpSel) {
@@ -2562,6 +2599,7 @@ function startGame() {
   setupBoardLabels();
   opponentType = (document.getElementById('opponentSelect')?.value || 'local');
   aiLevel = (document.getElementById('levelSelect')?.value || 'intermediate');
+  strengthPreset = (document.getElementById('strengthPresetSelect')?.value || 'strong');
   helpMode = (document.getElementById('helpSelect')?.value || 'off');
   timeControl = (document.getElementById('timeControlSelect')?.value || 'rapid');
   updateGameTypeUI();
@@ -3796,7 +3834,7 @@ function aiMoveLocalGreedy() {
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function setControlsDisabled(disabled) {
-  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
+  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','strengthPresetSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !!disabled;
   });
@@ -4312,6 +4350,7 @@ if (gameTypeSel) gameType = gameTypeSel.value || 'human_vs_ai';
 if (aiWhiteSel) aiVsAiEngines.w = aiWhiteSel.value || 'local';
 if (aiBlackSel) aiVsAiEngines.b = aiBlackSel.value || 'local';
 if (aiVsAiSpeedSel) aiVsAiMoveDelayMs = parseInt(aiVsAiSpeedSel.value || '500', 10) || 500;
+if (strengthPresetSel) strengthPreset = strengthPresetSel.value || 'strong';
 updateGameTypeUI();
 setupBoardLabels();
 setupDemoOverlayDrag();
