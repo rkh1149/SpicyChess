@@ -3398,6 +3398,7 @@ function onSwapClick() {
     const sq = e.target.getAttribute('data-square'); if (!sq) return;
     const p = getPieceOnSquare(sq); if (!p) return alert('No piece there.');
     if ((player === 'w' && p.startsWith('b')) || (player === 'b' && p.startsWith('w'))) return alert('Pick your own piece.');
+    if (swapSelection.length === 1 && swapSelection[0] === sq) return;
     swapSelection.push(sq); highlightSquare(sq, true);
     if (swapSelection.length === 2) {
       const [a, b] = swapSelection;
@@ -3405,8 +3406,9 @@ function onSwapClick() {
       const map = fenToBoard(currentFen);
       const tmp = map[a]; map[a] = map[b]; map[b] = tmp;
       const newFen = boardToFen(map, currentFen, true);
+      const testFen = boardToFen(map, currentFen, false);
       const test = new Chess();
-      if (!test.load(newFen) || test.in_check()) { alert('Swap would create an illegal position.'); clearSwap(handler); return; }
+      if (!test.load(testFen) || test.in_check()) { alert('Swap would create an illegal position.'); clearSwap(handler); return; }
       game.load(newFen); board.position(game.fen());
       setLastMove(a, b);
       playerSpecialState[player].swapUsed = true;
@@ -3502,15 +3504,21 @@ function onBackInTimeClick() {
   const lastFen = moveHistory[moveHistory.length - 2];
   if (!lastFen) return alert('Cannot undo.');
   game.load(lastFen); board.position(game.fen());
+  // Back In Time rule: the undone side forfeits its next turn.
+  const fenParts = game.fen().split(' ');
+  fenParts[1] = player;
+  if (!game.load(fenParts.join(' '))) return alert('Could not apply Back In Time turn-loss rule.');
+  board.position(game.fen());
   setLastMove(null, null);
   moveHistory.pop();
+  moveHistory[moveHistory.length - 1] = game.fen();
   if (moveSans.length) moveSans.pop();
   if (specialStateHistory.length > moveHistory.length) specialStateHistory.pop();
   if (lostPiecesHistory.length > moveHistory.length) lostPiecesHistory.pop();
   restoreStateSnapshotAt(moveHistory.length - 1);
   renderMoveHistoryPanel();
   playerSpecialState[player].backInTimeUsed = true;
-  log(`${player === 'w' ? 'White' : 'Black'} used Back In Time.`);
+  log(`${player === 'w' ? 'White' : 'Black'} used Back In Time (opponent loses next turn).`);
   postMoveChecksAndFlow(player);
 }
 
@@ -4278,16 +4286,20 @@ function playDemoBackInTime(player = 'w') {
   if (moveHistory.length < 2) return false;
   const lastFen = moveHistory[moveHistory.length - 2];
   if (!lastFen || !game.load(lastFen)) return false;
+  const fenParts = game.fen().split(' ');
+  fenParts[1] = player;
+  if (!game.load(fenParts.join(' '))) return false;
   board.position(game.fen());
   setLastMove(null, null);
   moveHistory.pop();
+  moveHistory[moveHistory.length - 1] = game.fen();
   if (moveSans.length) moveSans.pop();
   if (specialStateHistory.length > moveHistory.length) specialStateHistory.pop();
   if (lostPiecesHistory.length > moveHistory.length) lostPiecesHistory.pop();
   restoreStateSnapshotAt(moveHistory.length - 1);
   renderMoveHistoryPanel();
   playerSpecialState[player].backInTimeUsed = true;
-  log('Demo special: Back In Time (opponent move undone)');
+  log('Demo special: Back In Time (opponent move undone + loses next turn)');
   postMoveChecksAndFlow(player);
   return true;
 }
@@ -4354,16 +4366,16 @@ async function runSpecialMovesDemo() {
         from: 'e8',
         to: 'e7',
         title: 'Back In Time (Chaotic)',
-        body: 'Back In Time rewinds the opponent’s most recent move, restoring the previous board state.',
+        body: 'Back In Time rewinds the opponent’s most recent move, restoring the previous board state, and the undone side loses its next turn.',
         moveText: 'Setup move first: ...Ke7, then rewind it',
-        resultBody: 'Result: the opponent’s last move was undone and the prior position returned.',
+        resultBody: 'Result: the opponent’s last move was undone, the prior position returned, and that side lost the next turn.',
         setup: () => {
           if (!playDemoMove('e2', 'e4')) return false;
           if (!playDemoMove('e8', 'e7')) return false;
           return true;
         },
         execute: () => playDemoBackInTime('w'),
-        afterText: 'Back In Time activated: Black’s last move was undone.'
+        afterText: 'Back In Time activated: Black’s last move was undone, and Black lost the next turn.'
       }
     ];
 
@@ -4450,16 +4462,36 @@ function escapeHtml(value) {
 }
 function getSquareElementFromInputEvent(e) {
   if (!e) return null;
-  let target = null;
+  const boardEl = document.getElementById('board');
+  const directTarget = e.target || null;
+  if (directTarget && directTarget.closest) {
+    const directSquare = directTarget.closest('[data-square]');
+    if (directSquare) return directSquare;
+  }
+
+  let x = null, y = null;
   if (typeof e.clientX === 'number' && typeof e.clientY === 'number') {
-    target = document.elementFromPoint(e.clientX, e.clientY);
+    x = e.clientX; y = e.clientY;
   } else if (e.changedTouches && e.changedTouches.length) {
     const t = e.changedTouches[0];
-    target = document.elementFromPoint(t.clientX, t.clientY);
-  } else {
-    target = e.target || null;
+    x = t.clientX; y = t.clientY;
   }
-  return target && target.closest ? target.closest('[data-square]') : null;
+
+  if (typeof x === 'number' && typeof y === 'number') {
+    const topEl = document.elementFromPoint(x, y);
+    if (topEl && topEl.closest) {
+      const sq = topEl.closest('[data-square]');
+      if (sq) return sq;
+    }
+    // Fallback for chessboard.js where piece nodes can float above squares.
+    const squares = boardEl ? boardEl.querySelectorAll('[data-square]') : document.querySelectorAll('[data-square]');
+    for (const sq of squares) {
+      const r = sq.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return sq;
+    }
+  }
+
+  return null;
 }
 function isKnightMove(from, to) {
   const fx = from.charCodeAt(0), fy = parseInt(from[1],10);
@@ -4469,23 +4501,61 @@ function isKnightMove(from, to) {
 }
 function attachSquareClickHandlers(handler) {
   if (!handler || squareHandlerBindings.has(handler)) return;
-  const clickWrapper = (e) => {
+  let lastSig = '';
+  let lastTs = 0;
+  const dispatch = (e) => {
     const sqEl = getSquareElementFromInputEvent(e);
     if (!sqEl) return;
+    const sq = sqEl.getAttribute('data-square') || '';
+    const now = Date.now();
+    const sig = `${e.type}:${sq}`;
+    // Ignore duplicate click/pointer pairs fired for the same square.
+    if (sig === lastSig && (now - lastTs) < 120) return;
+    lastSig = sig;
+    lastTs = now;
     handler({ target: sqEl, originalEvent: e });
+  };
+  const clickWrapper = (e) => {
+    // On pointer-capable browsers, pointerup handles mouse/touch/pen reliably.
+    if (window.PointerEvent) return;
+    dispatch(e);
   };
   const pointerWrapper = (e) => {
-    if (!e || e.pointerType === 'mouse') return;
-    const sqEl = getSquareElementFromInputEvent(e);
-    if (!sqEl) return;
+    if (!e) return;
+    if (typeof e.button === 'number' && e.button !== 0) return;
     e.preventDefault();
-    handler({ target: sqEl, originalEvent: e });
+    dispatch(e);
   };
-  squareHandlerBindings.set(handler, { clickWrapper, pointerWrapper });
+  const touchWrapper = (e) => {
+    if (!e) return;
+    e.preventDefault();
+    dispatch(e);
+  };
+  const boardWrapperClick = (e) => clickWrapper(e);
+  const boardWrapperPointer = (e) => pointerWrapper(e);
+  const boardWrapperTouch = (e) => touchWrapper(e);
+  const docWrapperClick = (e) => clickWrapper(e);
+  const docWrapperPointer = (e) => pointerWrapper(e);
+  const docWrapperTouch = (e) => touchWrapper(e);
+  squareHandlerBindings.set(handler, {
+    clickWrapper, pointerWrapper, touchWrapper,
+    boardWrapperClick, boardWrapperPointer, boardWrapperTouch,
+    docWrapperClick, docWrapperPointer, docWrapperTouch
+  });
   document.querySelectorAll('[data-square]').forEach(el => {
     el.addEventListener('click', clickWrapper);
-    el.addEventListener('pointerup', pointerWrapper, { passive: false });
+    el.addEventListener('pointerup', pointerWrapper, { passive: false, capture: true });
+    el.addEventListener('touchend', touchWrapper, { passive: false, capture: true });
   });
+  const boardEl = document.getElementById('board');
+  if (boardEl) {
+    boardEl.addEventListener('click', boardWrapperClick, true);
+    boardEl.addEventListener('pointerup', boardWrapperPointer, { passive: false, capture: true });
+    boardEl.addEventListener('touchend', boardWrapperTouch, { passive: false, capture: true });
+  }
+  document.addEventListener('click', docWrapperClick, true);
+  document.addEventListener('pointerup', docWrapperPointer, { passive: false, capture: true });
+  document.addEventListener('touchend', docWrapperTouch, { passive: false, capture: true });
 }
 
 function detachSquareClickHandlers(handler) {
@@ -4493,18 +4563,38 @@ function detachSquareClickHandlers(handler) {
   if (!bound) return;
   document.querySelectorAll('[data-square]').forEach(el => {
     el.removeEventListener('click', bound.clickWrapper);
-    el.removeEventListener('pointerup', bound.pointerWrapper);
+    el.removeEventListener('pointerup', bound.pointerWrapper, true);
+    el.removeEventListener('touchend', bound.touchWrapper, true);
   });
+  const boardEl = document.getElementById('board');
+  if (boardEl) {
+    boardEl.removeEventListener('click', bound.boardWrapperClick, true);
+    boardEl.removeEventListener('pointerup', bound.boardWrapperPointer, true);
+    boardEl.removeEventListener('touchend', bound.boardWrapperTouch, true);
+  }
+  document.removeEventListener('click', bound.docWrapperClick, true);
+  document.removeEventListener('pointerup', bound.docWrapperPointer, true);
+  document.removeEventListener('touchend', bound.docWrapperTouch, true);
   squareHandlerBindings.delete(handler);
 }
 
 function clearSquareInteractionHandlers() {
   const squares = document.querySelectorAll('[data-square]');
+  const boardEl = document.getElementById('board');
   squareHandlerBindings.forEach((bound) => {
     squares.forEach(el => {
       el.removeEventListener('click', bound.clickWrapper);
-      el.removeEventListener('pointerup', bound.pointerWrapper);
+      el.removeEventListener('pointerup', bound.pointerWrapper, true);
+      el.removeEventListener('touchend', bound.touchWrapper, true);
     });
+    if (boardEl) {
+      boardEl.removeEventListener('click', bound.boardWrapperClick, true);
+      boardEl.removeEventListener('pointerup', bound.boardWrapperPointer, true);
+      boardEl.removeEventListener('touchend', bound.boardWrapperTouch, true);
+    }
+    document.removeEventListener('click', bound.docWrapperClick, true);
+    document.removeEventListener('pointerup', bound.docWrapperPointer, true);
+    document.removeEventListener('touchend', bound.docWrapperTouch, true);
   });
   squareHandlerBindings.clear();
 }
