@@ -98,6 +98,27 @@
     .board-actions { margin-top: 8px; text-align: center; }
     .board-action-row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
     #aiReplayRow { display: none; }
+    #openingLearnWrap {
+      display: none;
+      margin-top: 8px;
+      text-align: left;
+      border: 1px solid #d7e4f5;
+      border-radius: 8px;
+      background: #f8fbff;
+      padding: 8px;
+    }
+    #openingLearnWrap label {
+      display: block;
+      font-weight: 700;
+      font-size: 0.82rem;
+      color: #2c3850;
+      margin-bottom: 4px;
+    }
+    #openingLearnInfo {
+      margin-top: 6px;
+      color: #4b5a72;
+      font-size: 0.8rem;
+    }
     #touchHint {
       margin-top: 8px;
       font-size: 0.78rem;
@@ -372,6 +393,13 @@
           <button id="replayPauseBtn" type="button">Pause</button>
           <button id="replayEndBtn" type="button">Replay End</button>
         </div>
+        <div id="openingLearnWrap">
+          <label for="openingSelect">Select Opening</label>
+          <select id="openingSelect" title="Choose an opening line to display on the board">
+            <option value="">Choose an opening...</option>
+          </select>
+          <div id="openingLearnInfo">Select an opening to play its main line on the board.</div>
+        </div>
         <button id="askHelpBtn" style="display:none;" title="Ask for your best next move">Ask Best Move</button>
         <div id="touchHint">Touch controls: tap a piece, then tap its destination square.</div>
         <div id="eloBoardPanel">
@@ -479,6 +507,7 @@
           <button id="resetBtn">Reset</button>
           <button id="undoBtn" title="Undo the last full move">Undo Full Move</button>
           <button id="rematchBtn" title="Start a new game with colors swapped">Rematch (Swap Sides)</button>
+          <button id="learnOpeningsBtn" title="Show and play common opening lines on the board">Learn Openings</button>
           <button id="demoBtn" title="Run a scripted showcase of special moves">Run Special Moves Demo</button>
         </div>
         <div class="note" id="opponentHint">Opponent: Local greedy AI. Choose “Stockfish (single-thread)” for engine play.</div>
@@ -607,6 +636,19 @@ const SEARCH_TT_MAX = 100000;
 let replayModeActive = false;
 let replayPly = 0;
 let replayTimer = null;
+let openingPreviewToken = 0;
+const openingLines = [
+  { key: 'ruy-lopez', name: 'Ruy Lopez', uci: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5', 'a7a6', 'b5a4', 'g8f6', 'e1g1', 'f8e7'] },
+  { key: 'italian-game', name: 'Italian Game', uci: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5', 'c2c3', 'g8f6', 'd2d4', 'e5d4'] },
+  { key: 'sicilian-defense', name: 'Sicilian Defense', uci: ['e2e4', 'c7c5', 'g1f3', 'd7d6', 'd2d4', 'c5d4', 'f3d4', 'g8f6', 'b1c3', 'a7a6'] },
+  { key: 'french-defense', name: 'French Defense', uci: ['e2e4', 'e7e6', 'd2d4', 'd7d5', 'b1c3', 'g8f6', 'e4e5', 'f6d7', 'f2f4', 'c7c5'] },
+  { key: 'caro-kann-defense', name: 'Caro-Kann Defense', uci: ['e2e4', 'c7c6', 'd2d4', 'd7d5', 'b1c3', 'd5e4', 'c3e4', 'c8f5', 'g1f3', 'e7e6'] },
+  { key: 'queens-gambit', name: 'Queen’s Gambit', uci: ['d2d4', 'd7d5', 'c2c4', 'e7e6', 'b1c3', 'g8f6', 'c1g5', 'f8e7', 'e2e3', 'e8g8'] },
+  { key: 'kings-indian-defense', name: 'King’s Indian Defense', uci: ['d2d4', 'g8f6', 'c2c4', 'g7g6', 'b1c3', 'f8g7', 'e2e4', 'd7d6', 'g1f3', 'e8g8'] },
+  { key: 'slav-defense', name: 'Slav Defense', uci: ['d2d4', 'd7d5', 'c2c4', 'c7c6', 'g1f3', 'g8f6', 'b1c3', 'd5c4', 'a2a4', 'c8f5'] },
+  { key: 'english-opening', name: 'English Opening', uci: ['c2c4', 'e7e5', 'b1c3', 'g8f6', 'g2g3', 'd7d5', 'c4d5', 'f6d5', 'f1g2', 'd5b6'] },
+  { key: 'london-system', name: 'London System', uci: ['d2d4', 'd7d5', 'g1f3', 'g8f6', 'c1f4', 'e7e6', 'e2e3', 'c7c5', 'c2c3', 'b8c6'] }
+];
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -1049,6 +1091,10 @@ const replayNextBtn = document.getElementById('replayNextBtn');
 const replayPlayBtn = document.getElementById('replayPlayBtn');
 const replayPauseBtn = document.getElementById('replayPauseBtn');
 const replayEndBtn = document.getElementById('replayEndBtn');
+const learnOpeningsBtn = document.getElementById('learnOpeningsBtn');
+const openingLearnWrap = document.getElementById('openingLearnWrap');
+const openingSelect = document.getElementById('openingSelect');
+const openingLearnInfo = document.getElementById('openingLearnInfo');
 if (oppSel) {
   oppSel.addEventListener('change', () => {
     opponentType = oppSel.value;
@@ -1137,6 +1183,18 @@ if (replayNextBtn) replayNextBtn.addEventListener('click', () => replayStep(1));
 if (replayPlayBtn) replayPlayBtn.addEventListener('click', startReplayAutoPlay);
 if (replayPauseBtn) replayPauseBtn.addEventListener('click', pauseReplayAutoPlay);
 if (replayEndBtn) replayEndBtn.addEventListener('click', () => replayJumpTo(Math.max(0, moveHistory.length - 1)));
+if (learnOpeningsBtn) {
+  learnOpeningsBtn.addEventListener('click', () => {
+    const visible = !!(openingLearnWrap && openingLearnWrap.style.display !== 'none');
+    setOpeningPanelVisible(!visible);
+  });
+}
+if (openingSelect) {
+  openingSelect.addEventListener('change', () => {
+    const key = openingSelect.value || '';
+    playOpeningPreview(key);
+  });
+}
 if (demoYesBtn) {
   demoYesBtn.addEventListener('click', () => {
     if (Date.now() < demoDialogArmedAt) return;
@@ -3936,8 +3994,143 @@ function aiMoveLocalGreedy() {
    ========================= */
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+function setOpeningPanelVisible(show) {
+  if (!openingLearnWrap) return;
+  openingLearnWrap.style.display = show ? 'block' : 'none';
+  if (!show && openingSelect) openingSelect.value = '';
+  if (openingLearnInfo) {
+    openingLearnInfo.textContent = show
+      ? 'Select an opening to play its main line on the board.'
+      : 'Select an opening to play its main line on the board.';
+  }
+}
+
+function populateOpeningSelect() {
+  if (!openingSelect) return;
+  const existing = new Set(Array.from(openingSelect.options).map(o => o.value));
+  for (const line of openingLines) {
+    if (!line || !line.key || existing.has(line.key)) continue;
+    const opt = document.createElement('option');
+    opt.value = line.key;
+    opt.textContent = line.name;
+    openingSelect.appendChild(opt);
+  }
+}
+
+async function ensureBoardReadyForOpeningPreview() {
+  if (game && board && typeof board.position === 'function') return true;
+
+  const gameTypeSelEl = document.getElementById('gameTypeSelect');
+  const sideSelEl = document.getElementById('sideSelect');
+  const oppSelEl = document.getElementById('opponentSelect');
+  const prev = {
+    gameType: gameTypeSelEl ? gameTypeSelEl.value : null,
+    side: sideSelEl ? sideSelEl.value : null,
+    opp: oppSelEl ? oppSelEl.value : null
+  };
+
+  if (gameTypeSelEl) gameTypeSelEl.value = 'human_vs_ai';
+  if (sideSelEl) sideSelEl.value = 'white';
+  if (oppSelEl) oppSelEl.value = 'local';
+  gameType = 'human_vs_ai';
+  userSide = 'white';
+  opponentType = 'local';
+  updateGameTypeUI();
+  updateOpponentHint();
+
+  startGame();
+  const ok = await waitForBoardReady(7000);
+
+  if (gameTypeSelEl && prev.gameType) gameTypeSelEl.value = prev.gameType;
+  if (sideSelEl && prev.side) sideSelEl.value = prev.side;
+  if (oppSelEl && prev.opp) oppSelEl.value = prev.opp;
+  gameType = (gameTypeSelEl ? gameTypeSelEl.value : gameType) || 'human_vs_ai';
+  userSide = (sideSelEl ? sideSelEl.value : userSide) || 'white';
+  opponentType = (oppSelEl ? oppSelEl.value : opponentType) || 'local';
+  updateGameTypeUI();
+  updateOpponentHint();
+  updateTurnInfo();
+  return ok;
+}
+
+async function playOpeningPreview(openingKey) {
+  const token = ++openingPreviewToken;
+  const line = openingLines.find(o => o.key === openingKey);
+  if (!line) {
+    if (openingLearnInfo) openingLearnInfo.textContent = 'Select an opening to play its main line on the board.';
+    return;
+  }
+
+  if (openingLearnInfo) openingLearnInfo.textContent = `Loading ${line.name}...`;
+  const ready = await ensureBoardReadyForOpeningPreview();
+  if (!ready || token !== openingPreviewToken || !game || !board) {
+    if (openingLearnInfo && token === openingPreviewToken) {
+      openingLearnInfo.textContent = 'Board not ready. Click Start Game once, then try Learn Openings again.';
+    }
+    return;
+  }
+
+  const prevDemo = isDemoRunning;
+  isDemoRunning = true;
+  clearAiVsAiTimer();
+  clearReplayTimer();
+  replayModeActive = false;
+  aiVsAiPaused = true;
+  gameActive = false;
+  stopClockTicker();
+  updateClockUI(null);
+
+  game.reset();
+  board.position(game.fen());
+  setLastMove(null, null);
+  moveHistory = [game.fen()];
+  moveSans = [];
+  specialStateHistory = [];
+  lostPiecesHistory = [];
+  lostPieces = { w: [], b: [] };
+  playerSpecialState = {
+    w: { swapUsed:false, shadowCooldown:0, backInTimeUsed:false, resurrectionUsed:false },
+    b: { swapUsed:false, shadowCooldown:0, backInTimeUsed:false, resurrectionUsed:false }
+  };
+  halfMoveCount = 0;
+  pushStateSnapshot();
+  renderMoveHistoryPanel();
+  updateTurnInfo();
+  refreshSpecialButtons();
+
+  for (let i = 0; i < line.uci.length; i += 1) {
+    if (token !== openingPreviewToken) break;
+    const u = String(line.uci[i] || '').toLowerCase();
+    const from = u.slice(0, 2);
+    const to = u.slice(2, 4);
+    const promotion = u.length > 4 ? u.slice(4) : undefined;
+    const mv = game.move({ from, to, promotion });
+    if (!mv) {
+      if (openingLearnInfo) openingLearnInfo.textContent = `${line.name}: move ${i + 1} is invalid in current position.`;
+      break;
+    }
+    trackCapturedFromMove(mv);
+    tickShadowCooldownFor(mv.color);
+    board.position(game.fen());
+    setLastMove(mv.from, mv.to);
+    appendHistoryEntry(mv.san);
+    if (openingLearnInfo) {
+      const who = mv.color === 'w' ? 'White' : 'Black';
+      openingLearnInfo.textContent = `${line.name} • ${i + 1}/${line.uci.length}: ${who} plays ${mv.san}`;
+    }
+    await sleep(480);
+  }
+
+  if (token === openingPreviewToken && openingLearnInfo) {
+    openingLearnInfo.textContent = `${line.name} loaded. You can choose another opening at any time.`;
+  }
+  updateTurnInfo();
+  updateReplayControlsState();
+  isDemoRunning = prevDemo;
+}
+
 function setControlsDisabled(disabled) {
-  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','strengthPresetSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
+  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','learnOpeningsBtn','openingSelect','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','strengthPresetSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !!disabled;
   });
@@ -4464,6 +4657,8 @@ updateTurnInfo();
 updateEloBoardPanel();
 updateHelpInfo();
 updateReplayControlsState();
+populateOpeningSelect();
+setOpeningPanelVisible(false);
 runAssetCheck();
 log('Loaded. Choose a mode and click "Start Game".');
 </script>
