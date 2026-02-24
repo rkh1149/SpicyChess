@@ -637,6 +637,7 @@ let replayModeActive = false;
 let replayPly = 0;
 let replayTimer = null;
 let openingPreviewToken = 0;
+let openingSpeechUtterance = null;
 const openingLines = [
   { key: 'ruy-lopez', name: 'Ruy Lopez', uci: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5', 'a7a6', 'b5a4', 'g8f6', 'e1g1', 'f8e7'] },
   { key: 'italian-game', name: 'Italian Game', uci: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5', 'c2c3', 'g8f6', 'd2d4', 'e5d4'] },
@@ -649,6 +650,18 @@ const openingLines = [
   { key: 'english-opening', name: 'English Opening', uci: ['c2c4', 'e7e5', 'b1c3', 'g8f6', 'g2g3', 'd7d5', 'c4d5', 'f6d5', 'f1g2', 'd5b6'] },
   { key: 'london-system', name: 'London System', uci: ['d2d4', 'd7d5', 'g1f3', 'g8f6', 'c1f4', 'e7e6', 'e2e3', 'c7c5', 'c2c3', 'b8c6'] }
 ];
+const openingExplanations = {
+  'ruy-lopez': 'The Ruy Lopez starts with pressure on Black\'s knight at c6, which indirectly targets the e5 pawn. White usually castles quickly and plays for central control with d4. Black often responds with a6 and either d6 or d5 depending on the variation. The opening is strategic: piece development, pawn structure, and long-term plans matter more than quick tactics. A key idea for White is kingside activity; for Black, it is timely counterplay in the center.',
+  'italian-game': 'The Italian Game builds active development and direct pressure on f7. White places the bishop on c4 and often uses c3 and d4 to claim the center. Black develops naturally with knight and bishop while looking for counterplay against White\'s center. This opening can lead to quiet maneuvering or sharp tactical attacks depending on move order. A practical goal is fast castling and coordinated pieces before launching operations against the opponent king or center.',
+  'sicilian-defense': 'The Sicilian Defense is Black\'s most combative answer to e4. Instead of mirroring e5, Black fights for the d4 square from the flank and creates imbalanced positions. White usually expands in the center with d4, and Black seeks dynamic counterplay on the queenside. Typical themes include opposite-side attacks, tactical piece sacrifices, and strong pawn breaks. The Sicilian rewards accurate move calculation and initiative, so development speed and king safety are critical for both sides.',
+  'french-defense': 'The French Defense creates a strong but somewhat closed center with e6 and d5. White gains space with e5 in many lines, while Black challenges that center later with c5 and f6 ideas. The resulting structures produce clear plans: White often attacks on the kingside, Black looks for counterplay on the queenside and against d4. Piece placement is very important, especially the light-squared bishops. This opening teaches strategic planning, pawn-chain play, and timing of pawn breaks.',
+  'caro-kann-defense': 'The Caro-Kann is a solid response to e4 that supports d5 with c6 before committing the king bishop. Black aims for a healthy pawn structure and reliable king safety, while White often gains a small space advantage and tries to keep initiative. Many lines are positional, with slow buildup rather than immediate tactical chaos. Typical plans involve central tension, minor-piece activity, and well-timed pawn breaks. It is an excellent opening for players who prefer structure and resilience.',
+  'queens-gambit': 'In the Queen\'s Gambit, White offers the c-pawn to gain central space and activity. Black can accept or decline, but in both cases the struggle revolves around the d5 and e4 squares. Development is usually classical: knights out early, bishops to active diagonals, and castling before major operations. White often presses a space edge, while Black seeks equality through piece pressure and pawn breaks like c5. This opening is foundational for strategic chess and positional understanding.',
+  'kings-indian-defense': 'The King\'s Indian Defense gives White central space while Black prepares a dynamic counterattack. Black fianchettos the dark-squared bishop and often allows White to build with d4 and e4 before striking with e5 or c5. Plans are rich: White may push on the queenside, Black often attacks the kingside. The positions are complex and tactical, with opposite-wing play common. Good timing is essential, because one side can win quickly if the other launches too late.',
+  'slav-defense': 'The Slav Defense is a reliable answer to d4, supporting d5 with c6 while keeping flexibility for the light-squared bishop. Black aims for a sound structure and active piece play without early weaknesses. White often develops naturally and tries to exploit central space or recover the c4 pawn with tempo. The opening can stay positional or sharpen quickly depending on pawn captures. It is popular because it combines solidity with practical counterplay and clear developmental plans.',
+  'english-opening': 'The English Opening starts with c4, controlling d5 and steering the game into flexible structures. White often develops with Nc3 and g3, choosing between quiet buildup and transposition into other openings. Black can respond symmetrically or challenge the center with e5 and d5 setups. Because the center is often formed later, move-order understanding matters a lot. Typical themes include long diagonal bishop play, queenside space, and strategic maneuvering before tactical opportunities appear.',
+  'london-system': 'The London System uses an early Bf4 setup against d5 structures, focusing on a stable development scheme. White usually plays Nf3, e3, and c3, then decides between central expansion and kingside activity. It is less about memorizing deep forcing lines and more about understanding piece placement and pawn breaks. Black seeks active counterplay with c5, Nc6, or pressure on the center. The London is practical, solid, and popular for players wanting consistent structures across many games.'
+};
 const inputCapabilities = (() => {
   if (typeof window === 'undefined') {
     return { hasCoarse: false, hasFine: false, hasTouch: false };
@@ -1215,6 +1228,11 @@ if (demoNoBtn) {
     }
   });
 }
+document.addEventListener('click', (e) => {
+  const btn = e && e.target && e.target.closest ? e.target.closest('button') : null;
+  if (!btn) return;
+  stopOpeningSpeech();
+}, true);
 const logDetails = document.getElementById('logDetails');
 if (logDetails && window.matchMedia && window.matchMedia('(max-width: 980px)').matches) {
   logDetails.open = false;
@@ -3503,11 +3521,15 @@ function onBackInTimeClick() {
   if (moveHistory.length < 2) return alert('No move to undo.');
   const lastFen = moveHistory[moveHistory.length - 2];
   if (!lastFen) return alert('Cannot undo.');
-  game.load(lastFen); board.position(game.fen());
+
   // Back In Time rule: the undone side forfeits its next turn.
-  const fenParts = game.fen().split(' ');
+  const fenParts = String(lastFen).split(' ');
+  if (fenParts.length < 6) return alert('Could not apply Back In Time.');
   fenParts[1] = player;
-  if (!game.load(fenParts.join(' '))) return alert('Could not apply Back In Time turn-loss rule.');
+  // When turn is flipped, a stale en-passant target can make FEN invalid in chess.js.
+  fenParts[3] = '-';
+  const backFen = fenParts.join(' ');
+  if (!game.load(backFen)) return alert('Could not apply Back In Time turn-loss rule.');
   board.position(game.fen());
   setLastMove(null, null);
   moveHistory.pop();
@@ -4004,6 +4026,7 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function setOpeningPanelVisible(show) {
   if (!openingLearnWrap) return;
+  if (!show) stopOpeningSpeech();
   openingLearnWrap.style.display = show ? 'block' : 'none';
   if (!show && openingSelect) openingSelect.value = '';
   if (openingLearnInfo) {
@@ -4061,8 +4084,33 @@ async function ensureBoardReadyForOpeningPreview() {
   return ok;
 }
 
+function stopOpeningSpeech() {
+  try {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  } catch (_) {}
+  openingSpeechUtterance = null;
+}
+
+function speakOpeningExplanation(line) {
+  if (!line || !line.key) return;
+  const text = openingExplanations[line.key];
+  if (!text) return;
+  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+    if (openingLearnInfo) openingLearnInfo.textContent += ' Voice explanation is not supported on this browser.';
+    return;
+  }
+  stopOpeningSpeech();
+  const msg = new SpeechSynthesisUtterance(`${line.name}. ${text}`);
+  msg.rate = 0.95;
+  msg.pitch = 1.0;
+  msg.volume = 1.0;
+  openingSpeechUtterance = msg;
+  try { window.speechSynthesis.speak(msg); } catch (_) {}
+}
+
 async function playOpeningPreview(openingKey) {
   const token = ++openingPreviewToken;
+  stopOpeningSpeech();
   const line = openingLines.find(o => o.key === openingKey);
   if (!line) {
     if (openingLearnInfo) openingLearnInfo.textContent = 'Select an opening to play its main line on the board.';
@@ -4131,6 +4179,7 @@ async function playOpeningPreview(openingKey) {
 
   if (token === openingPreviewToken && openingLearnInfo) {
     openingLearnInfo.textContent = `${line.name} loaded. You can choose another opening at any time.`;
+    speakOpeningExplanation(line);
   }
   updateTurnInfo();
   updateReplayControlsState();
@@ -4285,9 +4334,11 @@ function playDemoResurrection(pieceType, square, player = 'w') {
 function playDemoBackInTime(player = 'w') {
   if (moveHistory.length < 2) return false;
   const lastFen = moveHistory[moveHistory.length - 2];
-  if (!lastFen || !game.load(lastFen)) return false;
-  const fenParts = game.fen().split(' ');
+  if (!lastFen) return false;
+  const fenParts = String(lastFen).split(' ');
+  if (fenParts.length < 6) return false;
   fenParts[1] = player;
+  fenParts[3] = '-';
   if (!game.load(fenParts.join(' '))) return false;
   board.position(game.fen());
   setLastMove(null, null);
