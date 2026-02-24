@@ -119,6 +119,9 @@
       color: #4b5a72;
       font-size: 0.8rem;
     }
+    #openingVoiceBtn {
+      margin-top: 8px;
+    }
     #touchHint {
       margin-top: 8px;
       font-size: 0.78rem;
@@ -399,6 +402,7 @@
             <option value="">Choose an opening...</option>
           </select>
           <div id="openingLearnInfo">Select an opening to play its main line on the board.</div>
+          <button id="openingVoiceBtn" type="button" title="Play opening explanation audio">Play Voice</button>
         </div>
         <button id="askHelpBtn" style="display:none;" title="Ask for your best next move">Ask Best Move</button>
         <div id="touchHint">Touch controls: tap a piece, then tap its destination square.</div>
@@ -638,6 +642,8 @@ let replayPly = 0;
 let replayTimer = null;
 let openingPreviewToken = 0;
 let openingSpeechUtterance = null;
+let openingSpeechPrimed = false;
+let openingCurrentLine = null;
 const openingLines = [
   { key: 'ruy-lopez', name: 'Ruy Lopez', uci: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5', 'a7a6', 'b5a4', 'g8f6', 'e1g1', 'f8e7'] },
   { key: 'italian-game', name: 'Italian Game', uci: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f8c5', 'c2c3', 'g8f6', 'd2d4', 'e5d4'] },
@@ -1108,6 +1114,7 @@ const learnOpeningsBtn = document.getElementById('learnOpeningsBtn');
 const openingLearnWrap = document.getElementById('openingLearnWrap');
 const openingSelect = document.getElementById('openingSelect');
 const openingLearnInfo = document.getElementById('openingLearnInfo');
+const openingVoiceBtn = document.getElementById('openingVoiceBtn');
 if (oppSel) {
   oppSel.addEventListener('change', () => {
     opponentType = oppSel.value;
@@ -1198,14 +1205,26 @@ if (replayPauseBtn) replayPauseBtn.addEventListener('click', pauseReplayAutoPlay
 if (replayEndBtn) replayEndBtn.addEventListener('click', () => replayJumpTo(Math.max(0, moveHistory.length - 1)));
 if (learnOpeningsBtn) {
   learnOpeningsBtn.addEventListener('click', () => {
+    primeOpeningSpeechFromGesture();
     const visible = !!(openingLearnWrap && openingLearnWrap.style.display !== 'none');
     setOpeningPanelVisible(!visible);
   });
 }
 if (openingSelect) {
   openingSelect.addEventListener('change', () => {
+    primeOpeningSpeechFromGesture();
     const key = openingSelect.value || '';
     playOpeningPreview(key);
+  });
+}
+if (openingVoiceBtn) {
+  openingVoiceBtn.addEventListener('click', () => {
+    primeOpeningSpeechFromGesture();
+    if (!openingCurrentLine) {
+      if (openingLearnInfo) openingLearnInfo.textContent = 'Select an opening first.';
+      return;
+    }
+    speakOpeningExplanation(openingCurrentLine, { auto: false });
   });
 }
 if (demoYesBtn) {
@@ -1231,6 +1250,7 @@ if (demoNoBtn) {
 document.addEventListener('click', (e) => {
   const btn = e && e.target && e.target.closest ? e.target.closest('button') : null;
   if (!btn) return;
+  primeOpeningSpeechFromGesture();
   stopOpeningSpeech();
 }, true);
 const logDetails = document.getElementById('logDetails');
@@ -4029,11 +4049,18 @@ function setOpeningPanelVisible(show) {
   if (!show) stopOpeningSpeech();
   openingLearnWrap.style.display = show ? 'block' : 'none';
   if (!show && openingSelect) openingSelect.value = '';
+  if (!show) openingCurrentLine = null;
   if (openingLearnInfo) {
     openingLearnInfo.textContent = show
       ? 'Select an opening to play its main line on the board.'
       : 'Select an opening to play its main line on the board.';
   }
+  setOpeningVoiceButtonState(!!(show && openingCurrentLine));
+}
+
+function setOpeningVoiceButtonState(enabled) {
+  if (!openingVoiceBtn) return;
+  openingVoiceBtn.disabled = !enabled;
 }
 
 function populateOpeningSelect() {
@@ -4091,7 +4118,22 @@ function stopOpeningSpeech() {
   openingSpeechUtterance = null;
 }
 
-function speakOpeningExplanation(line) {
+function primeOpeningSpeechFromGesture() {
+  if (openingSpeechPrimed) return;
+  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
+  try {
+    const primer = new SpeechSynthesisUtterance(' ');
+    primer.volume = 0;
+    primer.rate = 1;
+    primer.pitch = 1;
+    window.speechSynthesis.speak(primer);
+    window.speechSynthesis.cancel();
+    openingSpeechPrimed = true;
+  } catch (_) {}
+}
+
+function speakOpeningExplanation(line, opts = {}) {
+  const auto = !!opts.auto;
   if (!line || !line.key) return;
   const text = openingExplanations[line.key];
   if (!text) return;
@@ -4104,14 +4146,41 @@ function speakOpeningExplanation(line) {
   msg.rate = 0.95;
   msg.pitch = 1.0;
   msg.volume = 1.0;
+  msg.onstart = () => {
+    if (openingLearnInfo) {
+      openingLearnInfo.textContent = `${line.name} loaded. Playing voice explanation...`;
+    }
+  };
+  msg.onend = () => {
+    if (openingLearnInfo) {
+      openingLearnInfo.textContent = `${line.name} loaded. Voice explanation complete.`;
+    }
+  };
   openingSpeechUtterance = msg;
-  try { window.speechSynthesis.speak(msg); } catch (_) {}
+  try {
+    window.speechSynthesis.speak(msg);
+    if (auto) {
+      setTimeout(() => {
+        const ss = window.speechSynthesis;
+        const active = !!(ss && (ss.speaking || ss.pending));
+        if (!active && openingLearnInfo && openingCurrentLine && openingCurrentLine.key === line.key) {
+          openingLearnInfo.textContent = `${line.name} loaded. Auto voice may be blocked on this browser. Tap "Play Voice".`;
+        }
+      }, 700);
+    }
+  } catch (_) {
+    if (openingLearnInfo) {
+      openingLearnInfo.textContent = `${line.name} loaded. Voice could not start automatically. Tap "Play Voice".`;
+    }
+  }
 }
 
 async function playOpeningPreview(openingKey) {
   const token = ++openingPreviewToken;
   stopOpeningSpeech();
   const line = openingLines.find(o => o.key === openingKey);
+  openingCurrentLine = line || null;
+  setOpeningVoiceButtonState(!!line);
   if (!line) {
     if (openingLearnInfo) openingLearnInfo.textContent = 'Select an opening to play its main line on the board.';
     return;
@@ -4179,7 +4248,7 @@ async function playOpeningPreview(openingKey) {
 
   if (token === openingPreviewToken && openingLearnInfo) {
     openingLearnInfo.textContent = `${line.name} loaded. You can choose another opening at any time.`;
-    speakOpeningExplanation(line);
+    speakOpeningExplanation(line, { auto: true });
   }
   updateTurnInfo();
   updateReplayControlsState();
@@ -4187,7 +4256,7 @@ async function playOpeningPreview(openingKey) {
 }
 
 function setControlsDisabled(disabled) {
-  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','learnOpeningsBtn','openingSelect','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','strengthPresetSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
+  ['startBtn','resignBtn','resetBtn','demoBtn','undoBtn','rematchBtn','exportPgnBtn','learnOpeningsBtn','openingSelect','openingVoiceBtn','modeSelect','gameTypeSelect','sideSelect','opponentSelect','aiWhiteEngineSelect','aiBlackEngineSelect','aiVsAiSpeedSelect','levelSelect','strengthPresetSelect','helpSelect','timeControlSelect','askHelpBtn','replayStartBtn','replayPrevBtn','replayNextBtn','replayPlayBtn','replayPauseBtn','replayEndBtn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = !!disabled;
   });
